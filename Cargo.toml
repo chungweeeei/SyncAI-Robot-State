@@ -1,0 +1,29 @@
+[package]
+name = "syncai_robot_state"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]                         # one [[bin]] per node; this is the name `ros2 run` uses
+name = "robot_state_node"
+path = "src/main.rs"
+
+[dependencies]
+rclrs = "0.8"
+# Pinned to 0.2 to match syncai_driver_manager; rclrs uses 0.3 internally and the two crates'
+# message types are NOT interchangeable, so never pass a type from one to an API of the other.
+ros-env = "0.2"
+# RobotState.network_status.wifi_info is a JSON *string*; the C++ node builds it with
+# nlohmann/json. serde_json's default Map is a BTreeMap, so keys come out alphabetically ordered
+# exactly as nlohmann's std::map-backed object does, and it escapes an SSID containing a quote or
+# a backslash correctly — which is the part a hand-rolled writer gets wrong.
+serde_json = "1"
+
+# Install launch/ and params/ into share/syncai_robot_state/ so the launch file finds them
+[package.metadata.ros]
+install_to_share = ["launch", "params"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -1,0 +1,27 @@
+# syncai_common (SyncAI-Robot-Interface): the msg / srv / action shared by the whole syncai stack.
+# Pulled in with vcstool rather than a submodule, same as SyncAI-Robot-Driver-Manager,
+# SyncAI-Robot-Backend and SyncAI-Robot-Workspace.
+#
+# The Dev Container imports it on creation (postCreateCommand). By hand, inside the container:
+#
+#   cd /workspace && vcs import < src/syncai_robot_state/interface.repos          # first import
+#   cd /workspace && vcs import --force < src/syncai_robot_state/interface.repos  # re-checkout after
+#                                                  # changing the version (overwrites local changes)
+#
+# Paths are relative to the vcs import target directory and the key below already includes `src/`,
+# so run it from the workspace root (/workspace in the container) without an extra `src` argument,
+# or it lands in src/src/.
+#
+# HTTPS rather than SSH: the repo is public, so the container needs no keys and CI can pull it directly.
+#
+# The import lands next to this package in the workspace, never inside this repo: it is another git
+# repo's working tree. Change messages there and commit them there; the next --force import
+# overwrites anything uncommitted. SyncAI-Robot-Workspace has its own interface.repos for the same
+# package, so this file is only for developing this repo on its own.
+#
+# Track dev (that repo's default branch): main lags behind dev.
+repositories:
+  src/syncai_common:
+    type: git
+    url: https://github.com/chungweeeei/SyncAI-Robot-Interface.git
+    version: dev

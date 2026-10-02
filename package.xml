@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>syncai_robot_state</name>
+  <version>0.1.0</version>
+  <description>Aggregates the robot's status sources into one syncai_common/RobotState</description>
+  <maintainer email="andy_tseng@syncrobotic.com">andy_tseng</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclrs</depend>
+  <depend>rosidl_runtime_rs</depend>
+  <!-- Message packages are declared here, NOT in Cargo.toml: colcon-ros-cargo puts them on
+       AMENT_PREFIX_PATH and wires them into the `ros_env` crate at build time, and without a
+       <depend> here `ros_env::<pkg>` simply does not exist. -->
+  <depend>syncai_common</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <!-- rclrs has no tf2_ros binding, so this node does its own `map -> base_link` lookup off the
+       /tf and /tf_static topics (see src/robot_state_node/tf.rs) and needs only the messages.
+
+       Unlike the packages above, tf2_msgs is NOT rebuilt by the ros2_rust underlay (ros2_rust's
+       .repos lists common_interfaces and rcl_interfaces; tf2_msgs lives in ros2/geometry2). It
+       does not need to be: the official ros-humble-tf2-msgs deb already ships generated Rust
+       bindings at share/tf2_msgs/rust, which is what this package links against. If a future base
+       image ever stops shipping them, add geometry2's tf2_msgs to the underlay's .repos. -->
+  <depend>tf2_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cargo</build_type>
+  </export>
+</package>
