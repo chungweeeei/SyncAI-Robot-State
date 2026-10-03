@@ -261,6 +261,12 @@ robot, the same split `protocol.rs` has in syncai_driver_manager.
 * **Message types come from `ros-env`** (`use ros_env::nav_msgs::msg::Odometry;`). Message packages
   go in `<depend>` in `package.xml`, **not** in `Cargo.toml`; without the `<depend>`, colcon does
   not put the package on `AMENT_PREFIX_PATH` and `ros_env::<pkg>` does not exist.
+* **The underlay is built with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`.** The image
+  pins Rust 1.85, which is rclrs's own `rust-version`, but rclrs commits no lock file and its
+  dependencies drift: a fresh resolve already picks a `uuid` that needs rustc 1.89 and the image
+  build fails with "rustc 1.85.0 is not supported". The fallback policy makes cargo prefer the
+  newest dependency version whose `rust-version` fits the toolchain, so a rebuild on a new machine
+  (or in CI) resolves the same way the pin intends.
 * **`tf2_msgs` is the one message package not rebuilt by the underlay.** ros2_rust's `.repos` lists
   `common_interfaces` and `rcl_interfaces`; `tf2_msgs` lives in `ros2/geometry2`. It does not need
   to be rebuilt — the official `ros-humble-tf2-msgs` deb already ships generated Rust bindings at

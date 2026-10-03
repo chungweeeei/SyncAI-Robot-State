@@ -107,6 +107,11 @@ justify it — it would buy a lock and nothing else.
 - The `Message` trait under `rclrs::*` is `rosidl_runtime_rs::Message`.
 - Message packages do not go in `Cargo.toml` but in `<depend>` in `package.xml`; without it
   `ros_env::<pkg>` does not exist.
+- **A fresh image build can fail with "rustc 1.85.0 is not supported"**: rclrs commits no lock
+  file, so its dependencies resolve to whatever is newest, and `uuid` already needs rustc 1.89.
+  The Dockerfile sets `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback` so cargo prefers
+  versions whose `rust-version` fits the pinned toolchain. Do not "fix" this by bumping the pin
+  alone: `clippy.toml` (`msrv`) and `rustfmt.toml` are written for 1.85.
 - **`tf2_msgs` comes from the apt deb, not the underlay.** Contrary to what the driver manager's
   README says about apt message packages, the official `ros-humble-*` interface debs DO ship
   generated Rust bindings at `share/<pkg>/rust` (22 of them in `ros:humble-ros-base`), and
