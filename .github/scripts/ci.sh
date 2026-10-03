@@ -15,9 +15,12 @@ cd /workspace
 vcs import --skip-existing < src/syncai_robot_state/interface.repos
 
 # The whole workspace, not --packages-select: syncai_common has to be built before this package
-# can resolve its message crates. console_cohesion prints each package's full output once it ends,
-# so a compiler error is readable in the log instead of interleaved.
-colcon build --symlink-install --event-handlers console_cohesion+
+# can resolve its message crates. --base-paths src so colcon only ever crawls the source tree:
+# colcon-cargo treats every Cargo.toml as a package, so anything else that lands under /workspace
+# (a cargo registry, a target directory without COLCON_IGNORE) would otherwise be picked up too.
+# console_cohesion prints each package's full output once it ends, so a compiler error is readable
+# in the log instead of interleaved.
+colcon build --base-paths src --symlink-install --event-handlers console_cohesion+
 
 # The overlay puts syncai_common on AMENT_PREFIX_PATH, which `ros-env` needs when cargo runs
 # outside colcon. The ROS setup scripts reference unset variables, so -u is lifted around them.

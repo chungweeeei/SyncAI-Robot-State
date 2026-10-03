@@ -61,19 +61,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Kept OUTSIDE the colcon workspace on purpose: colcon crawls /workspace for packages and
+      # colcon-cargo treats every Cargo.toml as one, so a restored registry inside it turns into
+      # hundreds of bogus packages and "Unable to order packages topologically".
       - name: Restore the cargo registry
         uses: actions/cache@v6
         with:
-          path: cargo-registry
+          path: ${{ runner.temp }}/cargo-registry
           key: cargo-registry-${{ hashFiles('src/syncai_robot_state/Cargo.lock') }}
           restore-keys: cargo-registry-
 
       # The image runs as `ros` (uid 1000) and the runner as uid 1001; the container has to be
-      # able to write build/ install/ log/ into the bind-mounted workspace.
+      # able to write build/ install/ log/ into the bind-mounted workspace and the registry.
       - name: Hand the workspace to the container user
         run: |
-          mkdir -p cargo-registry
-          sudo chown -R 1000:1000 "$GITHUB_WORKSPACE"
+          mkdir -p "$RUNNER_TEMP/cargo-registry"
+          sudo chown -R 1000:1000 "$GITHUB_WORKSPACE" "$RUNNER_TEMP/cargo-registry"
 
       # ROS_DOMAIN_ID=77 so a test that initialises rcl can never join a real graph (the runner
       # has none, but the habit is the point). RMW_IMPLEMENTATION matches devcontainer.json.
@@ -81,7 +84,7 @@ jobs:
         run: |
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/workspace" \
-            --volume "$GITHUB_WORKSPACE/cargo-registry:/home/ros/.cargo/registry" \
+            --volume "$RUNNER_TEMP/cargo-registry:/home/ros/.cargo/registry" \
             --env ROS_DOMAIN_ID=77 \
             --env RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
             syncai-robot-state-ci:latest \
@@ -90,4 +93,4 @@ jobs:
       # Give the files back so the checkout and cache post-steps can clean up and save.
       - name: Hand the workspace back to the runner
         if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/cargo-registry"
