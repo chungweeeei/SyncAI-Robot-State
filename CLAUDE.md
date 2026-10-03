@@ -41,6 +41,9 @@ docker exec syncai-robot-state bash -lc 'cd /workspace/src/syncai_robot_state &&
   entry per package on `AMENT_PREFIX_PATH`, and `ros-env` inlines message crates rather than
   depending on them.
 - Before finishing, build / clippy / fmt must have zero warnings and all unit tests must pass.
+- CI (`.github/workflows/ci.yml`) runs the same commands: `cargo fmt --check` on the bare runner,
+  and `.github/scripts/ci.sh` (vcs import, colcon build, `clippy -- -D warnings`, test) inside the
+  Dev Container image built from `.devcontainer/Dockerfile`. Keep the script and this list in step.
 
 ### Killing a test node
 
