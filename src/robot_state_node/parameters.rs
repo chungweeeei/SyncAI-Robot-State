@@ -9,7 +9,7 @@ use super::health::{self, Thresholds};
 /// Both ends are guards the C++ version does not need and does not have: `duration_cast` saturates
 /// where `Duration::from_secs_f64` panics, and an rclcpp wall timer tolerates a zero period.
 /// `1 / f64::MIN_POSITIVE` is ~4.5e307 seconds — finite, so it passes an `is_finite` check, and far
-/// past what a `Duration` can hold.
+/// past what a `Duration` can hold; a subnormal rate divides all the way to infinity.
 const MIN_PERIOD: Duration = Duration::from_millis(1);
 const MAX_PERIOD: Duration = Duration::from_secs(3600);
 
@@ -18,6 +18,7 @@ const MAX_PERIOD: Duration = Duration::from_secs(3600);
 /// A non-positive rate would make the timer either fail or fire as fast as the executor allows, so
 /// it is clamped to a slow but harmless 1 Hz rather than trusted. NaN and infinity take the same
 /// path, and the resulting period is then held inside [`MIN_PERIOD`]..=[`MAX_PERIOD`].
+#[must_use]
 pub fn period_from_rate(rate_hz: f64) -> Duration {
     let safe_rate = if rate_hz > 0.0 && rate_hz.is_finite() {
         rate_hz
@@ -25,13 +26,11 @@ pub fn period_from_rate(rate_hz: f64) -> Duration {
         1.0
     };
 
+    // A positive finite rate divides to a positive number or to +inf (for a subnormal), never to
+    // NaN, and `clamp` maps +inf onto MAX_PERIOD. Clamped BEFORE the conversion: from_secs_f64
+    // panics on a value that overflows a Duration, so clamping the Duration afterwards would be
+    // too late.
     let seconds = 1.0 / safe_rate;
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return Duration::from_secs(1);
-    }
-
-    // Clamped BEFORE the conversion: from_secs_f64 panics on a value that overflows a Duration,
-    // so clamping the Duration afterwards would be too late.
     Duration::from_secs_f64(seconds.clamp(MIN_PERIOD.as_secs_f64(), MAX_PERIOD.as_secs_f64()))
 }
 
@@ -130,21 +129,20 @@ impl Parameters {
             "release the WARNING latch above this battery percentage (0-100)",
         )?;
 
-        let (battery_thresholds, rejected) = health::validate(
+        let battery_thresholds = Thresholds::new(
             low_battery_warn_percentage.get(),
             low_battery_clear_percentage.get(),
-        );
-        if rejected {
+        )
+        .unwrap_or_else(|invalid| {
+            let fallback = Thresholds::default();
             log_error!(
                 node.logger(),
-                "[Parameters] low_battery_clear_percentage ({:.1}) must exceed \
-                 low_battery_warn_percentage ({:.1}); falling back to {:.1}/{:.1}",
-                low_battery_clear_percentage.get(),
-                low_battery_warn_percentage.get(),
-                battery_thresholds.warn,
-                battery_thresholds.clear,
+                "[Parameters] {invalid}; falling back to {:.1}/{:.1}",
+                fallback.warn(),
+                fallback.clear(),
             );
-        }
+            fallback
+        });
 
         let config = Config {
             robot_id: robot_id.get().to_string(),
@@ -172,8 +170,8 @@ impl Parameters {
              low battery: warn below {:.1}%, clear above {:.1}%",
             config.publish_period,
             config.mode_poll_period,
-            config.battery_thresholds.warn,
-            config.battery_thresholds.clear,
+            config.battery_thresholds.warn(),
+            config.battery_thresholds.clear(),
         );
 
         Ok((
@@ -218,6 +216,8 @@ mod tests {
         assert_eq!(period_from_rate(f64::INFINITY), Duration::from_secs(1));
         assert_eq!(period_from_rate(f64::NEG_INFINITY), Duration::from_secs(1));
         assert_eq!(period_from_rate(f64::MIN_POSITIVE), MAX_PERIOD);
+        // The smallest subnormal divides to +inf, which must clamp like any other huge period
+        assert_eq!(period_from_rate(5e-324), MAX_PERIOD);
         // A rate so high the period rounds to zero would give a timer that never stops firing
         assert_eq!(period_from_rate(1e9), MIN_PERIOD);
     }

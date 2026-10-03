@@ -182,24 +182,28 @@ impl RobotStateData {
 
         match change {
             LatchChange::Held => {}
+            LatchChange::NoUsableSample { sample: None } => log_warn!(
+                self.logger.throttle(SAMPLE_LOG_THROTTLE),
+                "[RobotStateNode] No battery_state received yet; holding low_battery latch at {}",
+                self.latch.is_engaged(),
+            ),
             LatchChange::NoUsableSample {
-                have_sample,
-                percentage,
+                sample: Some(percentage),
             } => log_warn!(
                 self.logger.throttle(SAMPLE_LOG_THROTTLE),
-                "[RobotStateNode] No usable battery sample (have_sample={have_sample}, \
-                 percentage={percentage}); holding low_battery latch at {}",
+                "[RobotStateNode] Unusable battery sample ({percentage}%); holding low_battery \
+                 latch at {}",
                 self.latch.is_engaged(),
             ),
             LatchChange::Engaged(percentage) => log_warn!(
                 &self.logger,
                 "[RobotStateNode] battery {percentage:.1}% below {:.1}%; state -> WARNING",
-                self.config.battery_thresholds.warn,
+                self.config.battery_thresholds.warn(),
             ),
             LatchChange::Cleared(percentage) => log_info!(
                 &self.logger,
                 "[RobotStateNode] battery recovered to {percentage:.1}% (above {:.1}%)",
-                self.config.battery_thresholds.clear,
+                self.config.battery_thresholds.clear(),
             ),
         }
     }
