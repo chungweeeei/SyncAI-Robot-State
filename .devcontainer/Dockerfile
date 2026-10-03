@@ -58,6 +58,13 @@ ARG RUST_VERSION=1.85.0
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- --default-toolchain ${RUST_VERSION} -y --no-modify-path --component rustfmt --component clippy
 ENV PATH=${HOME}/.cargo/bin:${PATH}
+# rclrs declares rust-version 1.85 but its dependencies keep moving: on a fresh resolve cargo picks
+# the newest `uuid`, which already needs rustc 1.89, and the underlay build fails with "rustc
+# 1.85.0 is not supported". With the fallback policy cargo prefers the newest dependency version
+# whose own rust-version still fits the toolchain, so the pin above stays honest without a
+# committed lock file for the underlay. (Cargo 1.84+; this is the `[resolver]
+# incompatible-rust-versions` config key as an environment variable.)
+ENV CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
 
 
 RUN mkdir -p ${ROS2_RUST_UNDERLAY}/src \
