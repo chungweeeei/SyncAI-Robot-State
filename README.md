@@ -242,6 +242,9 @@ robot, the same split `protocol.rs` has in syncai_driver_manager.
   a reply is lost mid-flight the in-flight guard still releases after 5 polls and a fresh request
   goes out, but the dead callback stays in the client's request board. While sys_manager is simply
   down, the readiness check stops us sending at all, so this costs one closure per lost reply.
+  Each request carries a generation number, so should the abandoned reply arrive after all it is
+  recognised and ignored rather than releasing the guard under its replacement or overwriting the
+  fresher answer.
 * **`wifi_info` is built with serde_json rather than nlohmann/json**, and produces the same bytes:
   serde_json's default map is a `BTreeMap`, so keys come out alphabetically ordered exactly as
   nlohmann's `std::map`-backed object does, and no sample still dumps to the literal string `null`.

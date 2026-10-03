@@ -3,17 +3,21 @@
 //! Pure: no ROS types, no clock, no logging. The caller decides what to say about the
 //! [`LatchChange`] it gets back.
 
+use std::fmt;
+
 /// The hysteresis band, in percent (0-100).
 ///
 /// A bare comparison would flip `state` between IDLE and WARNING on every publish for a pack
 /// sitting on the threshold — once a second at the shipped 1 Hz, ten times a second at the 10 Hz
 /// code default — and a state that flaps is one nobody can act on.
-#[derive(Clone, Copy, Debug)]
+///
+/// The fields are private so that `clear > warn` holds for every value that exists: the only ways
+/// to get one are [`Thresholds::new`], which checks, and [`Thresholds::default`], which is known
+/// good. The latch can therefore rely on the band being a band.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Thresholds {
-    /// Latch WARNING below this.
-    pub warn: f64,
-    /// Release it only above this.
-    pub clear: f64,
+    warn: f64,
+    clear: f64,
 }
 
 /// The default pair, and the fallback when a params file supplies an unusable one.
@@ -33,18 +37,62 @@ impl Default for Thresholds {
     }
 }
 
+impl Thresholds {
+    /// Build a band, rejecting one that is not.
+    ///
+    /// Equal thresholds mean no hysteresis at all (the state flaps on sensor noise at the publish
+    /// rate); a clear value below the warn value means the latch can never clear. Neither is worth
+    /// honouring silently, so both come back as an [`InvalidBand`] for the caller to log and fall
+    /// back from, as the C++ version does at startup.
+    pub fn new(warn: f64, clear: f64) -> Result<Self, InvalidBand> {
+        if clear > warn {
+            Ok(Self { warn, clear })
+        } else {
+            Err(InvalidBand { warn, clear })
+        }
+    }
+
+    /// Latch WARNING below this.
+    pub fn warn(self) -> f64 {
+        self.warn
+    }
+
+    /// Release the latch only above this.
+    pub fn clear(self) -> f64 {
+        self.clear
+    }
+}
+
+/// A warn/clear pair that is not a hysteresis band. Carries the pair so the log line can show
+/// what was supplied next to what is used instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InvalidBand {
+    pub warn: f64,
+    pub clear: f64,
+}
+
+impl fmt::Display for InvalidBand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "low_battery_clear_percentage ({:.1}) must exceed low_battery_warn_percentage ({:.1})",
+            self.clear, self.warn
+        )
+    }
+}
+
 /// What one tick did to the latch. Everything but [`Self::Held`] is worth a log line.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LatchChange {
     /// Either inside the hysteresis band, or already on the side the reading calls for.
     Held,
     /// No evidence either way, so the latch keeps whatever it had. Carries what was seen, because
-    /// the two cases below are worth telling apart in the log.
+    /// "no `battery_state` has ever arrived" and "a sample arrived and reads 0" are worth telling
+    /// apart in the log.
     NoUsableSample {
-        /// False when no `battery_state` has ever arrived.
-        have_sample: bool,
-        /// 0.0 when there is no sample.
-        percentage: f64,
+        /// `None` when no `battery_state` has ever arrived; otherwise the reading that was
+        /// rejected (always 0 or below, see [`LowBatteryLatch::update`]).
+        sample: Option<f64>,
     },
     /// Crossed below `warn`; carries the reading that did it.
     Engaged(f64),
@@ -79,12 +127,9 @@ impl LowBatteryLatch {
     ///    rather than the validating parser it uses for every other section, so a non-numeric or
     ///    empty token silently publishes 0.0. A robot at a genuine 0% is not powered on to be
     ///    asked about.
-    pub fn update(&mut self, percentage: Option<f64>, thresholds: Thresholds) -> LatchChange {
-        let Some(percentage) = percentage.filter(|p| *p > 0.0) else {
-            return LatchChange::NoUsableSample {
-                have_sample: percentage.is_some(),
-                percentage: percentage.unwrap_or(0.0),
-            };
+    pub fn update(&mut self, sample: Option<f64>, thresholds: Thresholds) -> LatchChange {
+        let Some(percentage) = sample.filter(|p| *p > 0.0) else {
+            return LatchChange::NoUsableSample { sample };
         };
 
         if !self.engaged && percentage < thresholds.warn {
@@ -98,20 +143,6 @@ impl LowBatteryLatch {
             // hysteresis band.
             LatchChange::Held
         }
-    }
-}
-
-/// Reject a band that is not one, falling back to the defaults as a pair.
-///
-/// Equal thresholds mean no hysteresis at all (the state flaps on sensor noise at the publish
-/// rate); a clear value below the warn value means the latch can never clear. Neither is worth
-/// honouring silently. Returns the thresholds to use and whether the supplied pair was rejected,
-/// so the caller can log it as the C++ version does at startup.
-pub fn validate(warn: f64, clear: f64) -> (Thresholds, bool) {
-    if clear <= warn {
-        (Thresholds::default(), true)
-    } else {
-        (Thresholds { warn, clear }, false)
     }
 }
 
@@ -160,10 +191,7 @@ mod tests {
         let mut latch = LowBatteryLatch::default();
         assert_eq!(
             latch.update(None, Thresholds::default()),
-            LatchChange::NoUsableSample {
-                have_sample: false,
-                percentage: 0.0,
-            }
+            LatchChange::NoUsableSample { sample: None }
         );
         assert!(!latch.is_engaged());
     }
@@ -177,10 +205,7 @@ mod tests {
 
         assert_eq!(
             latch.update(Some(0.0), thresholds),
-            LatchChange::NoUsableSample {
-                have_sample: true,
-                percentage: 0.0,
-            }
+            LatchChange::NoUsableSample { sample: Some(0.0) }
         );
         assert!(!latch.is_engaged());
 
@@ -191,19 +216,46 @@ mod tests {
     }
 
     #[test]
-    fn an_unusable_band_falls_back_to_the_defaults_as_a_pair() {
-        let (thresholds, rejected) = validate(30.0, 30.0);
-        assert!(rejected);
-        assert_eq!(thresholds.warn, DEFAULT_WARN_PERCENTAGE);
-        assert_eq!(thresholds.clear, DEFAULT_CLEAR_PERCENTAGE);
+    fn a_band_is_accepted_as_supplied() {
+        let thresholds = Thresholds::new(30.0, 40.0).unwrap();
+        assert_eq!(thresholds.warn(), 30.0);
+        assert_eq!(thresholds.clear(), 40.0);
+    }
 
-        let (thresholds, rejected) = validate(30.0, 20.0);
-        assert!(rejected);
-        assert_eq!(thresholds.warn, DEFAULT_WARN_PERCENTAGE);
+    /// Equal or inverted pairs are rejected as a pair, carrying what was supplied for the log.
+    #[test]
+    fn an_unusable_band_is_rejected() {
+        assert_eq!(
+            Thresholds::new(30.0, 30.0),
+            Err(InvalidBand {
+                warn: 30.0,
+                clear: 30.0,
+            })
+        );
+        assert_eq!(
+            Thresholds::new(30.0, 20.0),
+            Err(InvalidBand {
+                warn: 30.0,
+                clear: 20.0,
+            })
+        );
+    }
 
-        let (thresholds, rejected) = validate(30.0, 40.0);
-        assert!(!rejected);
-        assert_eq!(thresholds.warn, 30.0);
-        assert_eq!(thresholds.clear, 40.0);
+    #[test]
+    fn the_defaults_are_themselves_a_valid_band() {
+        assert_eq!(
+            Thresholds::new(DEFAULT_WARN_PERCENTAGE, DEFAULT_CLEAR_PERCENTAGE),
+            Ok(Thresholds::default())
+        );
+    }
+
+    #[test]
+    fn an_invalid_band_names_both_values() {
+        let text = InvalidBand {
+            warn: 30.0,
+            clear: 20.0,
+        }
+        .to_string();
+        assert!(text.contains("20.0") && text.contains("30.0"), "{text}");
     }
 }
