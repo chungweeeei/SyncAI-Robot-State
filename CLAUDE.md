@@ -65,10 +65,10 @@ fakes cannot reach anything real.
 
 | File | Responsibility |
 | --- | --- |
-| `mod.rs` | Wiring: parameters → publisher → one worker → seven subscriptions + two timers |
+| `mod.rs` | Wiring: parameters → publisher → one worker → eight subscriptions + two timers |
 | `parameters.rs` | The nine load-time parameters (all read-only), and Hz -> period |
 | `state.rs` | The worker payload, sample intake, the latch tick and `build_state()` |
-| `subscribers.rs` | The seven subscriptions and their QoS |
+| `subscribers.rs` | The eight subscriptions and their QoS |
 | `mode_poll.rs` | The `get_mode` client poll, its in-flight guard and the mode cache |
 | `tf.rs` | **Pure** TF buffer + lookup replacing `tf2_ros`; no ROS types, all unit-tested |
 | `health.rs` | **Pure** low-battery hysteresis latch; unit-tested |

@@ -30,7 +30,7 @@ use subscribers::Subscriptions;
 ///
 /// # Threading
 ///
-/// Everything runs on ONE rclrs [`Worker`]: the seven subscriptions, the publish timer and the
+/// Everything runs on ONE rclrs [`Worker`]: the eight subscriptions, the publish timer and the
 /// get_mode poll timer. Callbacks on a worker never overlap, which gives the sample caches, the TF
 /// buffer and the health latch exactly the protection the C++ version's `mutex_` gives them, with
 /// no lock to take.
