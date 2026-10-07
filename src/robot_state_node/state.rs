@@ -26,8 +26,8 @@ const SAMPLE_LOG_THROTTLE: Duration = Duration::from_secs(5);
 /// handles needed to publish.
 ///
 /// The node "holds no state beyond the latest sample" apart from [`LowBatteryLatch`], and keeping
-/// that true is why `low_level_mode` is carried through untouched — two integers, no verdict, no
-/// freshness field.
+/// that true is why `low_level_mode` is carried through untouched — two integers and a bool, no
+/// verdict, no freshness field.
 pub struct RobotStateData {
     config: Config,
     publisher: Publisher<RobotState>,
@@ -49,6 +49,10 @@ pub struct RobotStateData {
     motor_states: Option<MotorStates>,
     /// Decoded in the callback rather than cached as a message, because the payload is two ints
     /// and validating on the way in means a short `data[]` never lands here.
+    ///
+    /// Fed by TWO topics: `policy_state` / `motion_state` from `mode`, `safety_state` from
+    /// `safety_locked`. Each intake writes only its own fields, so neither topic can reset what the
+    /// other reported.
     ///
     /// This carries NO indication of whether anything has ever been heard: 0 / 0 is both the
     /// initial value and a genuine "PPO / Stand". A receipt timestamp used to make the difference
@@ -134,10 +138,27 @@ impl RobotStateData {
             return;
         };
 
-        self.low_level_mode = RobotLowLevelMode {
-            policy_state: *policy_state,
-            motion_state: *motion_state,
-        };
+        // Field by field, not a fresh struct: `safety_state` comes from a different topic and a
+        // `mode` sample must not reset it to false.
+        self.low_level_mode.policy_state = *policy_state;
+        self.low_level_mode.motion_state = *motion_state;
+    }
+
+    /// syncai_driver_manager's software safety lock, true = engaged. Ours, not the gait
+    /// controller's — see RobotLowLevelMode.msg for why it rides in `low_level_mode` anyway.
+    ///
+    /// Logged on a change only: the source is latched and publishes only on a change, so every
+    /// sample after the first is already one — but a late join or a driver restart re-delivers the
+    /// current value, and that is not worth a line.
+    pub fn accept_safety_locked(&mut self, engaged: bool) {
+        if engaged != self.low_level_mode.safety_state {
+            log_info!(
+                &self.logger,
+                "[RobotStateNode] safety lock {}",
+                if engaged { "ENGAGED" } else { "released" },
+            );
+        }
+        self.low_level_mode.safety_state = engaged;
     }
 
     pub fn accept_transform(&mut self, parent: &str, child: &str, transform: Transform) {
@@ -295,9 +316,9 @@ impl RobotStateData {
             msg.motor_status.timestamp = motor_states.timestamp / 1_000_000_000;
         }
 
-        // Straight through, no branch: this defaults to 0 / 0, which is what a consumer sees
-        // before the first sample — and is indistinguishable from a genuine "PPO / Stand", because
-        // the field carries no freshness information.
+        // Straight through, no branch: this defaults to 0 / 0 / false, which is what a consumer
+        // sees before the first sample — and is indistinguishable from a genuine "PPO / Stand,
+        // lock released", because the field carries no freshness information.
         //
         // Nothing here judges freshness, and nothing here touches msg.state: RobotStatus has no
         // STALE value, UNINITIALIZED belongs to localization, and WARNING carries no reason field,

@@ -1,4 +1,4 @@
-//! The seven subscriptions, all on the node's single worker.
+//! The eight subscriptions, all on the node's single worker.
 //!
 //! Topic names are relative so they inherit the `<robot_id>` namespace — except `/tf` and
 //! `/tf_static`, which are absolute because TF is global in ROS 2. That is why the launch file
@@ -12,7 +12,7 @@
 use rclrs::*;
 use ros_env::nav_msgs::msg::Odometry;
 use ros_env::sensor_msgs::msg::BatteryState;
-use ros_env::std_msgs::msg::Int32MultiArray;
+use ros_env::std_msgs::msg::{Bool, Int32MultiArray};
 use ros_env::syncai_common::msg::{MotorStates, WifiStatus};
 use ros_env::tf2_msgs::msg::TFMessage;
 
@@ -32,6 +32,7 @@ pub struct Subscriptions {
     _wifi_status: WorkerSubscription<WifiStatus, RobotStateData>,
     _motor_states: WorkerSubscription<MotorStates, RobotStateData>,
     _mode: WorkerSubscription<Int32MultiArray, RobotStateData>,
+    _safety_locked: WorkerSubscription<Bool, RobotStateData>,
     _tf: WorkerSubscription<TFMessage, RobotStateData>,
     _tf_static: WorkerSubscription<TFMessage, RobotStateData>,
 }
@@ -78,8 +79,7 @@ impl Subscriptions {
             )?,
 
             // The gait controller's own state machine, as syncai_driver_manager reports it back.
-            // RELIABLE depth 10 — the only reliable endpoint in this node, and an exact mirror of
-            // that publisher.
+            // RELIABLE depth 10 — an exact mirror of that publisher.
             //
             // Reliability is REQUESTED rather than merely tolerated because this topic is
             // edge-triggered, not a periodic stream: the driver publishes only when a telemetry
@@ -97,6 +97,29 @@ impl Subscriptions {
                     // so the positional meaning of data[] is convention, not something the message
                     // declares.
                     data.accept_low_level_mode(&msg.data);
+                },
+            )?,
+
+            // syncai_driver_manager's software safety lock (its `SafetyLock`), carried on
+            // RobotState.low_level_mode.safety_state. RELIABLE + TRANSIENT_LOCAL depth 1, an exact
+            // mirror of that publisher, which is latched: it publishes the released state once at
+            // startup and then only on a change.
+            //
+            // The transient-local is what makes this work at all. With nothing periodic behind the
+            // topic, a VOLATILE subscriber started after the driver (the normal boot order — this
+            // pane comes up last) would never hear the startup sample and would report `false`
+            // until the lock next moved, which could be never.
+            //
+            // The price is that this reader now REQUIRES a transient-local writer. DDS matches
+            // durability only when the offered level is at least the requested one, so if that
+            // publisher is ever relaxed to VOLATILE this subscription stops matching SILENTLY and
+            // safety_state reads `false` for good — not merely without the late-joiner delivery.
+            // (The reverse pairing, a volatile reader on a transient-local writer, is the one that
+            // is compatible.) Change the two together.
+            _safety_locked: worker.create_subscription(
+                "safety_locked".keep_last(1).reliable().transient_local(),
+                |data: &mut RobotStateData, msg: Bool| {
+                    data.accept_safety_locked(msg.data);
                 },
             )?,
 
