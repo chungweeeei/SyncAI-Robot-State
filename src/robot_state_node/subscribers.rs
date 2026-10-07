@@ -108,9 +108,14 @@ impl Subscriptions {
             // The transient-local is what makes this work at all. With nothing periodic behind the
             // topic, a VOLATILE subscriber started after the driver (the normal boot order — this
             // pane comes up last) would never hear the startup sample and would report `false`
-            // until the lock next moved, which could be never. A transient-local reader is still
-            // compatible with a volatile writer, so this does not stop matching if that publisher
-            // is ever relaxed — it only loses the late-joiner delivery.
+            // until the lock next moved, which could be never.
+            //
+            // The price is that this reader now REQUIRES a transient-local writer. DDS matches
+            // durability only when the offered level is at least the requested one, so if that
+            // publisher is ever relaxed to VOLATILE this subscription stops matching SILENTLY and
+            // safety_state reads `false` for good — not merely without the late-joiner delivery.
+            // (The reverse pairing, a volatile reader on a transient-local writer, is the one that
+            // is compatible.) Change the two together.
             _safety_locked: worker.create_subscription(
                 "safety_locked".keep_last(1).reliable().transient_local(),
                 |data: &mut RobotStateData, msg: Bool| {
