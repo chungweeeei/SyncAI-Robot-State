@@ -26,7 +26,8 @@ One node that aggregates the robot's scattered status sources into a single
     battery_state (BatteryState)  ───────┼──►  syncai_robot_state  ──► robot_state ──► syncai_backend
     wifi_status   (WifiStatus)    ───────┤          (1 Hz)                              (out of tree)
     motor_states  (MotorStates)   ───────┤                                                   │
-    mode          (Int32MultiArray) ─────┘                                                   ▼
+    mode          (Int32MultiArray) ─────┤                                                   ▼
+    safety_locked (Bool, latched) ───────┘                                                   │
     get_mode      (service, polled) ─────┘                                    GET /api/v1/robot/state
 ```
 
@@ -53,13 +54,21 @@ name (`<robot_id>/base_link`) instead.
 | Subscribe | `wifi_status` | `syncai_common/WifiStatus` | BEST_EFFORT, VOLATILE, KeepLast(1) |
 | Subscribe | `motor_states` | `syncai_common/MotorStates` | SensorData |
 | Subscribe | `mode` | `std_msgs/Int32MultiArray` | RELIABLE, VOLATILE, KeepLast(10) |
+| Subscribe | `safety_locked` | `std_msgs/Bool` | RELIABLE, TRANSIENT_LOCAL, KeepLast(1) |
 | Subscribe | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | KeepLast(100), reliable; `/tf_static` also TRANSIENT_LOCAL |
 | Service client | `get_mode` | `syncai_common/GetMode` | polled at `mode_poll_rate`, at most one request in flight |
 
-`mode` is **the only RELIABLE endpoint in this node**, mirroring its publisher in
-`syncai_driver_manager`: that topic is edge-triggered rather than periodic, so a dropped sample is
-not made good by the next one. The flip side is that a publisher relaxed to best-effort would stop
-matching this subscription **silently** — check with `ros2 topic info /<robot_id>/mode --verbose`.
+`mode` and `safety_locked` are **the only RELIABLE endpoints in this node**, mirroring their
+publishers in `syncai_driver_manager`: both topics are edge-triggered rather than periodic, so a
+dropped sample is not made good by the next one. The flip side is that a publisher relaxed to
+best-effort would stop matching these subscriptions **silently** — check with
+`ros2 topic info /<robot_id>/mode --verbose`.
+
+`safety_locked` is additionally **TRANSIENT_LOCAL**, again mirroring its publisher, which is
+latched: the driver publishes the released state once at startup and then only on a change. This
+node comes up after the driver, so a volatile reader would never hear that startup sample and would
+report `false` until the lock next moved. Its value lands in `low_level_mode.safety_state`; a `mode`
+sample writes only `policy_state` / `motion_state`, so the two topics cannot overwrite each other.
 The same trap points the other way at `robot_state`: a best-effort publisher cannot satisfy a
 RELIABLE subscriber, so subscribing with the default rclcpp/rclpy QoS receives nothing at all.
 
@@ -195,7 +204,7 @@ best-effort.
 │       ├── mod.rs          # wiring: parameters → publisher → one worker → subscriptions + timers
 │       ├── parameters.rs   # the nine load-time parameters, and Hz -> period
 │       ├── state.rs        # the worker payload, sample intake, and the build-and-publish tick
-│       ├── subscribers.rs  # the seven subscriptions and their QoS
+│       ├── subscribers.rs  # the eight subscriptions and their QoS
 │       ├── mode_poll.rs    # the get_mode client poll and its in-flight guard
 │       ├── tf.rs           # the TF buffer and lookup that replace tf2_ros  (pure, unit-tested)
 │       ├── health.rs       # the low-battery hysteresis latch                (pure, unit-tested)
@@ -212,6 +221,11 @@ robot, the same split `protocol.rs` has in syncai_driver_manager.
 
 ## Differences from the C++ version
 
+* **`safety_locked` is subscribed, and `low_level_mode.safety_state` is filled from it.** The one
+  deliberate widening of the interface: the C++ version has neither, because the topic itself is a
+  Rust-only addition in syncai_driver_manager. It needs `syncai_common` at or after
+  SyncAI-Robot-Interface `b1996dd`, which added the field — so unlike everything else in this list,
+  the backend does have to rebuild against the new interface to read it.
 * **TF is looked up by this package, not by tf2_ros.** rclrs has no `tf2_ros` binding, so the node
   subscribes `/tf` and `/tf_static` itself and walks the tree in `src/robot_state_node/tf.rs`. It
   keeps only the newest transform per child frame, with no time history, no interpolation and no
@@ -227,7 +241,7 @@ robot, the same split `protocol.rs` has in syncai_driver_manager.
 * **Parameters are declared read-only**, so `ros2 param set` is rejected. The C++ reads each
   parameter once and has no `add_on_set_parameters_callback`, so a set there appears to succeed and
   changes nothing. Same effective behaviour, made visible.
-* **One worker instead of two callback groups and a mutex.** The seven subscriptions and both
+* **One worker instead of two callback groups and a mutex.** The eight subscriptions and both
   timers run on a single rclrs `Worker`, whose callbacks never overlap — which is exactly the
   protection the C++ `mutex_` provides, with no lock to take. The C++ needs a second
   `MutuallyExclusive` group because `tf2_ros::Buffer::transform()` blocks for the whole
@@ -299,8 +313,8 @@ vcs import --force < src/syncai_robot_state/interface.repos   # discard local ch
   `syncai_driver_manager` dies the latch freezes on its last verdict: died at 15% → `WARNING`
   forever (errs safe), died at 80% → `IDLE` forever (misleading).
 * **`WARNING` carries no reason.** A second `WARNING` condition will need a reason field or bitmask.
-* **`low_level_mode` has no freshness information at all.** `0 / 0` before the first sample is
-  indistinguishable from a genuine "PPO / Stand", and a frozen value is equally consistent with a
+* **`low_level_mode` has no freshness information at all.** `0 / 0 / false` before the first sample
+  is indistinguishable from a genuine "PPO / Stand, lock released", and a frozen value is equally consistent with a
   dead driver, a controller that stopped sending the MODE_STATE section, and nothing having
   changed. `motor_status.timestamp` advancing is the nearest available proxy for
   "syncai_driver_manager is alive".
