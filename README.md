@@ -6,9 +6,12 @@ The ROS 2 package `syncai_robot_state`, written with [`ros2_rust`](https://githu
 It is a Rust port of the C++ (rclcpp) `syncai_robot_state` in SyncAI-Robot-Workspace, and **its
 external interface is deliberately identical**: the node name `syncai_robot_state`, the executable
 `robot_state_node`, parameter names, topics, message types, QoS and the service it calls are all
-the same, so it is a drop-in replacement and `syncai_backend` needs no changes. For behavioural
-detail the C++ README is authoritative; [Differences from the C++ version](#differences-from-the-c-version)
-below lists every place this port knowingly deviates.
+the same, so it is a drop-in replacement. The one exception is a deliberate widening: the
+`safety_locked` subscription, which fills `low_level_mode.safety_state` — a field the backend has
+to rebuild against SyncAI-Robot-Interface to read, though nothing it reads today changed. For
+behavioural detail the C++ README is authoritative;
+[Differences from the C++ version](#differences-from-the-c-version) below lists every place this
+port knowingly deviates, that widening included.
 
 **This repo is itself a single colcon package** (`package.xml` / `Cargo.toml` live at the root).
 Like SyncAI-Robot-Driver-Manager, whose layout and conventions it follows, it is pulled into
@@ -72,6 +75,7 @@ sample writes only `policy_state` / `motion_state`, so the two topics cannot ove
 Durability has the same silent failure as reliability: a transient-local reader matches only a
 transient-local writer, so a driver relaxed to VOLATILE would leave `safety_state` at `false` with
 no error anywhere. Change the two sides together.
+
 The same trap points the other way at `robot_state`: a best-effort publisher cannot satisfy a
 RELIABLE subscriber, so subscribing with the default rclcpp/rclpy QoS receives nothing at all.
 
@@ -227,8 +231,9 @@ robot, the same split `protocol.rs` has in syncai_driver_manager.
 * **`safety_locked` is subscribed, and `low_level_mode.safety_state` is filled from it.** The one
   deliberate widening of the interface: the C++ version has neither, because the topic itself is a
   Rust-only addition in syncai_driver_manager. It needs `syncai_common` at or after
-  SyncAI-Robot-Interface `306f04a` (PR #6, merged into `dev`), which added the field — so unlike everything else in this list,
-  the backend does have to rebuild against the new interface to read it.
+  SyncAI-Robot-Interface `306f04a` (PR #6, merged into `dev`), which added the field — so unlike
+  everything else in this list, the backend does have to rebuild against the new interface to
+  read it.
 * **TF is looked up by this package, not by tf2_ros.** rclrs has no `tf2_ros` binding, so the node
   subscribes `/tf` and `/tf_static` itself and walks the tree in `src/robot_state_node/tf.rs`. It
   keeps only the newest transform per child frame, with no time history, no interpolation and no

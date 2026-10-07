@@ -5,7 +5,10 @@ status sources into one `syncai_common/RobotState` at 1 Hz. It is a port of
 `~/Desktop/Projects/SyncAI-Robot-Workspace/src/syncai_robot_state` (C++ / rclcpp), and **its
 external interface must stay identical to the C++ version** (node name `syncai_robot_state`,
 executable `robot_state_node`, parameter names, topics, message types, QoS, the `get_mode` client):
-`syncai_backend` depends on it. When behaviour is in doubt, the C++ version is authoritative; the
+`syncai_backend` depends on it. The one deliberate exception is a widening, not a change: the
+`safety_locked` subscription feeding `low_level_mode.safety_state`, which the C++ version lacks
+because the topic itself is Rust-only in syncai_driver_manager. Any further widening goes in the
+same README list. When behaviour is in doubt, the C++ version is authoritative; the
 README's "Differences from the C++ version" lists every knowing deviation and must stay complete.
 
 Its sibling is SyncAI-Robot-Driver-Manager (also Rust/rclrs), whose layout and conventions this
