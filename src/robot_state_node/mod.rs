@@ -23,8 +23,8 @@ use subscribers::Subscriptions;
 /// 2026-09, so this topic is a cross-repository contract: widening a field is free, changing or
 /// removing one is not.
 ///
-/// It derives very little: a yaw extraction, a unit conversion, the localization-validity flag and
-/// one latched threshold (low battery -> WARNING). It holds no state beyond the latest sample of
+/// It derives very little: a yaw extraction, the height through the lidar, a unit conversion, the
+/// localization-validity flag and one latched threshold (low battery -> WARNING). It holds no state beyond the latest sample of
 /// each input and that one latch. **It only ever reports** — no threshold here commands the robot
 /// to do anything.
 ///
