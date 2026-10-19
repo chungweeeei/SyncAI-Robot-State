@@ -1,10 +1,11 @@
 # Launch the syncai_robot_state node — publishes syncai_common/RobotState at 1 Hz, with position
-# from TF (map -> <robot_id>/base_link) and forward velocity from the odom topic.
+# from TF (map -> <robot_id>/base_link, its height through <robot_id>/pointlio_body and
+# <robot_id>/lidar_top_imu) and forward velocity from the odom topic.
 #
 # robot_id is read from the system config INI at launch time (same convention as
 # sys_manager.launch.py) and is used as the node namespace, as the `robot_id` node parameter, and
-# to rewrite the base_frame parameter, since TF frame names are not namespaced by ROS. The
-# global_frame stays "map".
+# to rewrite the base_frame / body_frame / lidar_frame parameters, since TF frame names are not
+# namespaced by ROS. The global_frame stays "map".
 #
 # The same INI may provide a [map] section with a "map" key (the map YAML path); when present it
 # overrides the `map` node parameter so the published RobotState.map reflects the map this instance
@@ -81,11 +82,16 @@ def launch_setup(context, *args, **kwargs):
     params_file = LaunchConfiguration("params_file")
 
     # Override the yaml defaults with the INI robot_id. TF frame names are not namespaced by ROS,
-    # so base_frame gets the robot_id prefix here. Later entries in this list take precedence over
-    # the params file.
+    # so the three robot frames get the robot_id prefix here. Later entries in this list take
+    # precedence over the params file.
     overrides = {
         "robot_id": robot_id,
         "base_frame": f"{robot_id}/base_link",
+        "body_frame": f"{robot_id}/pointlio_body",
+        # The lidar's IMU, not the lidar: Point-LIO's body frame is the IMU, so that is the link
+        # that closes the body chain back onto the base. syncai_bringup's G23.urdf has it as
+        # lidar_top_imu under lidar_top (the lidar) since 2026-10; lidar_top here was ~5 cm off.
+        "lidar_frame": f"{robot_id}/lidar_top_imu",
     }
     # Only override `map` when the INI actually provides one, so an absent [map] map leaves the
     # params-file default in place.

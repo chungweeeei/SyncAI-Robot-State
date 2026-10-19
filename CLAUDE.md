@@ -5,10 +5,12 @@ status sources into one `syncai_common/RobotState` at 1 Hz. It is a port of
 `~/Desktop/Projects/SyncAI-Robot-Workspace/src/syncai_robot_state` (C++ / rclcpp), and **its
 external interface must stay identical to the C++ version** (node name `syncai_robot_state`,
 executable `robot_state_node`, parameter names, topics, message types, QoS, the `get_mode` client):
-`syncai_backend` depends on it. The one deliberate exception is a widening, not a change: the
-`safety_locked` subscription feeding `low_level_mode.safety_state`, which the C++ version lacks
-because the topic itself is Rust-only in syncai_driver_manager. Any further widening goes in the
-same README list. When behaviour is in doubt, the C++ version is authoritative; the
+`syncai_backend` depends on it. There are two deliberate exceptions. The `safety_locked`
+subscription feeding `low_level_mode.safety_state`, which the C++ version lacks because the topic
+itself is Rust-only in syncai_driver_manager. And `localization_status.position.z`, read through
+Point-LIO's body frame and the URDF's link for it, the lidar's IMU (two more frame parameters,
+`body_frame` / `lidar_frame` = `lidar_top_imu`) because the planar `map -> base_link` both versions take x / y / yaw from reports 0
+on every storey. Any further deviation goes in the same README list. When behaviour is in doubt, the C++ version is authoritative; the
 README's "Differences from the C++ version" lists every knowing deviation and must stay complete.
 
 Its sibling is SyncAI-Robot-Driver-Manager (also Rust/rclrs), whose layout and conventions this
@@ -69,7 +71,7 @@ fakes cannot reach anything real.
 | File | Responsibility |
 | --- | --- |
 | `mod.rs` | Wiring: parameters → publisher → one worker → eight subscriptions + two timers |
-| `parameters.rs` | The nine load-time parameters (all read-only), and Hz -> period |
+| `parameters.rs` | The eleven load-time parameters (all read-only), and Hz -> period |
 | `state.rs` | The worker payload, sample intake, the latch tick and `build_state()` |
 | `subscribers.rs` | The eight subscriptions and their QoS |
 | `mode_poll.rs` | The `get_mode` client poll, its in-flight guard and the mode cache |

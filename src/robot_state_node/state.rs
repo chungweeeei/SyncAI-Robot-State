@@ -15,7 +15,7 @@ use std::time::Duration;
 use super::health::{LatchChange, LowBatteryLatch};
 use super::mode_poll::ModePoll;
 use super::parameters::Config;
-use super::tf::{InvalidTransform, TfBuffer, Transform};
+use super::tf::{InvalidTransform, ReportedPose, TfBuffer, Transform};
 use super::wifi::{self, WifiInfo};
 
 // The C++ throttles these at 2 s (TF) and 5 s (everything else); matched so the log reads the same
@@ -249,11 +249,16 @@ impl RobotStateData {
         // temperatures, precisely when an operator is trying to work out why the robot will not
         // localize. The message now goes out regardless, carrying an explicit "the pose is not
         // usable" marker instead.
-        match self
-            .tf
-            .pose_of(&self.config.global_frame, &self.config.base_frame)
-        {
-            Ok(pose) => {
+        match self.tf.robot_pose(
+            &self.config.global_frame,
+            &self.config.base_frame,
+            &self.config.body_frame,
+            &self.config.lidar_frame,
+        ) {
+            Ok(ReportedPose {
+                pose,
+                planar_z_reason,
+            }) => {
                 msg.localization_valid = true;
                 msg.localization_status.position = RobotPose {
                     x: pose.x,
@@ -261,6 +266,17 @@ impl RobotStateData {
                     z: pose.z,
                     yaw: pose.yaw,
                 };
+                // The planar z is 0 on every storey, which puts an upstairs robot on the ground
+                // floor for every consumer. Worth a line, not a dropped pose.
+                if let Some(e) = planar_z_reason {
+                    log_warn!(
+                        self.logger.throttle(TF_LOG_THROTTLE),
+                        "[RobotStateNode] Height through the lidar unavailable ({e}); reporting \
+                         the z of TF {} -> {}, which is planar",
+                        self.config.global_frame,
+                        self.config.base_frame,
+                    );
+                }
             }
             Err(e) => {
                 // localization_status stays zero-initialised. Deliberately NOT the last known

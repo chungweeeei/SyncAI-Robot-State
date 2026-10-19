@@ -1,8 +1,10 @@
 //! The TF lookup the C++ node gets from `tf2_ros::Buffer` + `TransformListener`.
 //!
 //! rclrs has no `tf2_ros` binding, so the node subscribes `/tf` and `/tf_static` itself and feeds
-//! the transforms into [`TfBuffer`]. [`TfBuffer::pose_of`] then answers the one question this node
-//! ever asks: where is `base_frame` in `global_frame`, at the latest available time.
+//! the transforms into [`TfBuffer`]. [`TfBuffer::robot_pose`] then answers the one question this
+//! node ever asks: where is `base_frame` in `global_frame`, at the latest available time — its
+//! x / y / yaw from that chain, its height through the lidar (see
+//! [`TfBuffer::height_through_lidar`] for why the two differ).
 //!
 //! Nothing here touches ROS types — the subscription converts at the boundary — so the whole
 //! module is unit-testable without a ROS environment or the robot, like `protocol.rs` in
@@ -163,6 +165,16 @@ pub struct Pose {
     pub z: f64,
     /// Radians.
     pub yaw: f64,
+}
+
+/// What [`TfBuffer::robot_pose`] answers: the pose `RobotState` reports, and whether its z is the
+/// real height.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportedPose {
+    pub pose: Pose,
+    /// Why `pose.z` is the planar chain's z (0 on this stack) rather than the height through the
+    /// lidar. `None` when it is the real height.
+    pub planar_z_reason: Option<LookupError>,
 }
 
 /// Why a transform was not stored. The caller logs it; the buffer keeps its previous value for
@@ -332,6 +344,62 @@ impl TfBuffer {
             y: transform.translation[1],
             z: transform.translation[2],
             yaw: transform.rotation.yaw(),
+        })
+    }
+
+    /// The height of `base` in `target`, measured through the lidar rather than `base`'s own chain.
+    ///
+    /// On this stack `map -> <robot_id>/base_link` is planar: syncai_lio_bridge projects both
+    /// `odom -> base_link` and `map -> odom` onto the ground plane for the 2D nav stack, so the z of
+    /// that chain is 0 on every storey. The one chain that still climbs is Point-LIO's,
+    /// `map -> pointlio_odom -> pointlio_body`, whose body frame is the lidar's built-in IMU.
+    /// Closing it with the URDF's static `base -> lidar_top_imu` (the lidar mount plus the IMU's
+    /// offset inside the lidar; `lidar` below) gives the real base pose:
+    ///
+    /// ```text
+    /// target <- base  =  (target <- body) · (base <- lidar)⁻¹
+    /// ```
+    ///
+    /// In full 3D, not as "body z minus the mount height": the lidar sits ahead of base_link as
+    /// well as above it, so once the base itself pitches (a stair, a ramp) a constant offset is
+    /// off by that lever arm. Only the z is taken — x / y / yaw stay with the planar chain, which
+    /// is what the nav stack drives by.
+    pub fn height_through_lidar(
+        &self,
+        target: &str,
+        base: &str,
+        body: &str,
+        lidar: &str,
+    ) -> Result<f64, LookupError> {
+        let target_body = self.lookup(target, body)?;
+        let base_lidar = self.lookup(base, lidar)?;
+        Ok(target_body.then(base_lidar.inverse()).translation[2])
+    }
+
+    /// The pose `RobotState` reports: [`Self::pose_of`] `target <- base`, with its z replaced by
+    /// [`Self::height_through_lidar`] whenever that chain is there.
+    ///
+    /// Only the planar lookup can fail this: it is what `localization_valid` means. A missing lidar
+    /// chain (no Point-LIO yet, a wrong frame name) keeps the planar z and says why, so a pose is
+    /// never withheld for the sake of its height.
+    pub fn robot_pose(
+        &self,
+        target: &str,
+        base: &str,
+        body: &str,
+        lidar: &str,
+    ) -> Result<ReportedPose, LookupError> {
+        let mut pose = self.pose_of(target, base)?;
+        let planar_z_reason = match self.height_through_lidar(target, base, body, lidar) {
+            Ok(z) => {
+                pose.z = z;
+                None
+            }
+            Err(e) => Some(e),
+        };
+        Ok(ReportedPose {
+            pose,
+            planar_z_reason,
         })
     }
 }
@@ -584,5 +652,157 @@ mod tests {
 
         // The good transform from the top is still the one that answers
         assert_close(buffer.pose_of("map", "base_link").unwrap().x, 1.0);
+    }
+
+    // --- the height through the lidar ----------------------------------------------------------
+
+    const BASE: &str = "robot/base_link";
+    const LIDAR: &str = "robot/lidar_top";
+    const LIO_ODOM: &str = "robot/pointlio_odom";
+    const BODY: &str = "robot/pointlio_body";
+
+    /// A rotation of `pitch` radians about Y.
+    fn pitch_quaternion(pitch: f64) -> Quaternion {
+        Quaternion {
+            x: 0.0,
+            y: (pitch / 2.0).sin(),
+            z: 0.0,
+            w: (pitch / 2.0).cos(),
+        }
+    }
+
+    /// G23's `base_link -> lidar_top` (syncai_bringup's description/G23.urdf): 0.195 m ahead,
+    /// 0.155 m up, pitched 0.25 rad.
+    fn lidar_mount() -> Transform {
+        Transform {
+            translation: [0.195, 0.0, 0.155],
+            rotation: pitch_quaternion(0.25),
+        }
+    }
+
+    /// The AUTO tree for a robot whose base is really at `base`: lio_bridge's planar
+    /// `map -> odom -> base_link` (x / y / yaw of it, z 0), the URDF's mount, and Point-LIO's
+    /// `map -> pointlio_odom -> pointlio_body` with the body at `base · mount`. The localizer's
+    /// `map -> pointlio_odom` is deliberately not planar, so nothing cancels by accident.
+    fn auto_tree(base: Transform) -> TfBuffer {
+        let mut buffer = TfBuffer::default();
+        buffer
+            .insert("map", "robot/odom", transform([0.0, 0.0, 0.0], 0.0))
+            .unwrap();
+        buffer
+            .insert(
+                "robot/odom",
+                BASE,
+                transform(
+                    [base.translation[0], base.translation[1], 0.0],
+                    base.rotation.yaw(),
+                ),
+            )
+            .unwrap();
+        buffer.insert(BASE, LIDAR, lidar_mount()).unwrap();
+
+        let map_lio_odom = Transform {
+            translation: [3.0, 1.0, 0.2],
+            rotation: yaw_quaternion(0.7).multiply(pitch_quaternion(0.05)),
+        };
+        buffer.insert("map", LIO_ODOM, map_lio_odom).unwrap();
+        let lio_odom_body = map_lio_odom.inverse().then(base.then(lidar_mount()));
+        buffer.insert(LIO_ODOM, BODY, lio_odom_body).unwrap();
+        buffer
+    }
+
+    /// Upstairs, pitched 0.3 rad on a step: 3.2 m up, which the planar chain reports as 0.
+    fn on_a_stair() -> Transform {
+        Transform {
+            translation: [2.0, 3.0, 3.2],
+            rotation: yaw_quaternion(1.0).multiply(pitch_quaternion(0.3)),
+        }
+    }
+
+    #[test]
+    fn the_height_comes_through_the_lidar_and_the_rest_from_the_planar_chain() {
+        let buffer = auto_tree(on_a_stair());
+
+        assert_close(buffer.pose_of("map", BASE).unwrap().z, 0.0);
+
+        let reported = buffer.robot_pose("map", BASE, BODY, LIDAR).unwrap();
+        assert_eq!(reported.planar_z_reason, None);
+        assert_pose_close(
+            reported.pose,
+            Pose {
+                x: 2.0,
+                y: 3.0,
+                z: 3.2,
+                yaw: 1.0,
+            },
+        );
+    }
+
+    /// Why the mount is composed rather than subtracted: on level ground the lidar is a constant
+    /// 0.155 m above base_link, but on a stair the 0.195 m it sits ahead swings up or down too.
+    #[test]
+    fn a_constant_mount_offset_is_only_right_on_level_ground() {
+        let level = Transform {
+            translation: [2.0, 3.0, 3.2],
+            rotation: yaw_quaternion(1.0),
+        };
+        for (base, offset_is_right) in [(level, true), (on_a_stair(), false)] {
+            let buffer = auto_tree(base);
+            let body_z = buffer.lookup("map", BODY).unwrap().translation[2];
+            assert_eq!((body_z - 0.155 - 3.2).abs() < 1e-9, offset_is_right);
+            assert_close(
+                buffer
+                    .height_through_lidar("map", BASE, BODY, LIDAR)
+                    .unwrap(),
+                3.2,
+            );
+        }
+    }
+
+    /// No Point-LIO body yet (or a wrong frame name): the pose still goes out, with the planar z
+    /// and the reason it is not the real one.
+    #[test]
+    fn without_the_lidar_chain_the_planar_z_is_kept_and_the_reason_given() {
+        let mut buffer = TfBuffer::default();
+        buffer
+            .insert("map", "robot/odom", transform([0.0, 0.0, 0.0], 0.0))
+            .unwrap();
+        buffer
+            .insert("robot/odom", BASE, transform([2.0, 3.0, 0.0], 1.0))
+            .unwrap();
+        buffer.insert(BASE, LIDAR, lidar_mount()).unwrap();
+
+        let reported = buffer.robot_pose("map", BASE, BODY, LIDAR).unwrap();
+        assert_eq!(
+            reported.planar_z_reason,
+            Some(LookupError::UnknownFrame(BODY.into()))
+        );
+        assert_pose_close(
+            reported.pose,
+            Pose {
+                x: 2.0,
+                y: 3.0,
+                z: 0.0,
+                yaw: 1.0,
+            },
+        );
+    }
+
+    /// A mapping run: Point-LIO's half of the tree and the URDF are there, lio_bridge's
+    /// `map -> odom -> base_link` is not. The planar lookup is what `localization_valid` means, so
+    /// there is no pose to report.
+    #[test]
+    fn without_the_planar_chain_there_is_no_pose_whatever_the_lidar_says() {
+        let mut buffer = auto_tree(on_a_stair());
+        buffer.links.remove("robot/odom");
+        buffer.links.remove(BASE);
+
+        assert_eq!(
+            buffer.robot_pose("map", BASE, BODY, LIDAR),
+            Err(LookupError::NotConnected {
+                target: "map".into(),
+                source: BASE.into(),
+            })
+        );
     }
 }

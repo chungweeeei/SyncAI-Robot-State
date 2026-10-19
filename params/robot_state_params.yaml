@@ -8,8 +8,9 @@
 # to this one node (see launch/robot_state.launch.py).
 /**:
   ros__parameters:
-    # robot_id and base_frame are overridden by the launch file with the [system] robot_id from
-    # config/system.ini; the values below are only fallbacks when the node is run without it.
+    # robot_id and the three robot frames are overridden by the launch file with the [system]
+    # robot_id from config/system.ini; the values below are only fallbacks when the node is run
+    # without it.
     robot_id: "default_robot"
     # Map name stamped into RobotState.map. Usually overridden from the launch file, which takes
     # [map] map from the INI — and that is a map YAML *path*, not a name.
@@ -19,6 +20,14 @@
     # launch, which is how robots sharing one /tf are kept apart.
     global_frame: "map"
     base_frame: "base_link"
+    # The height is NOT taken from that lookup: syncai_lio_bridge broadcasts map -> base_link
+    # planar, so its z is 0 on every storey. It is read through Point-LIO's body frame (the
+    # lidar's built-in IMU, map -> pointlio_odom -> pointlio_body) and the URDF's
+    # base_link -> lidar_top_imu instead, falling back to the planar z with a warning while that
+    # chain is missing. Not in the C++ version. lidar_frame was lidar_top until 2026-10, when
+    # syncai_bringup split the lidar (lidar_top) from its IMU (lidar_top_imu, t_il ~5 cm away).
+    body_frame: "pointlio_body"
+    lidar_frame: "lidar_top_imu"
     # TF lookup tolerance in seconds.
     #
     # Carried for parity with the C++ version, where it has no effect either: the lookup is gated

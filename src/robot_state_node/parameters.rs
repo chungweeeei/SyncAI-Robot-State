@@ -44,10 +44,16 @@ pub struct Config {
     /// Stamped into `RobotState.map`. Despite the name the launch file usually puts a *path* here
     /// (the map YAML from the INI's `[map] map`), which goes through to the REST payload verbatim.
     pub map: String,
-    /// TF frame names are not namespaced by ROS; the launch file prefixes `base_frame` with
-    /// `<robot_id>/` and leaves `global_frame` as plain `map`.
+    /// TF frame names are not namespaced by ROS; the launch file prefixes `base_frame`,
+    /// `body_frame` and `lidar_frame` with `<robot_id>/` and leaves `global_frame` as plain `map`.
     pub global_frame: String,
     pub base_frame: String,
+    /// Point-LIO's body frame, which is the lidar's built-in IMU: the one chain whose z still
+    /// climbs (see `TfBuffer::height_through_lidar`).
+    pub body_frame: String,
+    /// The URDF's link for that IMU (`lidar_top_imu`), whose static `base_frame -> lidar_frame`
+    /// closes the body chain back onto the base.
+    pub lidar_frame: String,
     pub transform_tolerance: f64,
     pub publish_period: Duration,
     pub mode_poll_period: Duration,
@@ -70,6 +76,8 @@ pub struct Parameters {
     _map: ReadOnlyParameter<Arc<str>>,
     _global_frame: ReadOnlyParameter<Arc<str>>,
     _base_frame: ReadOnlyParameter<Arc<str>>,
+    _body_frame: ReadOnlyParameter<Arc<str>>,
+    _lidar_frame: ReadOnlyParameter<Arc<str>>,
     _transform_tolerance: ReadOnlyParameter<f64>,
     _publish_rate: ReadOnlyParameter<f64>,
     _mode_poll_rate: ReadOnlyParameter<f64>,
@@ -105,6 +113,19 @@ impl Parameters {
             "base_frame",
             "base_link",
             "TF frame of the robot; the launch file prefixes it with <robot_id>/",
+        )?;
+        // Not in the C++ version: the height through the lidar is a widening (see the README).
+        let body_frame = text(
+            "body_frame",
+            "pointlio_body",
+            "Point-LIO body (= the lidar's IMU) TF frame the robot's height is read through; the \
+             launch file prefixes it with <robot_id>/",
+        )?;
+        let lidar_frame = text(
+            "lidar_frame",
+            "lidar_top_imu",
+            "URDF link of the lidar's IMU that ties body_frame back to base_frame; the launch file \
+             prefixes it with <robot_id>/",
         )?;
         let transform_tolerance = number(
             "transform_tolerance",
@@ -149,6 +170,8 @@ impl Parameters {
             map: map.get().to_string(),
             global_frame: global_frame.get().to_string(),
             base_frame: base_frame.get().to_string(),
+            body_frame: body_frame.get().to_string(),
+            lidar_frame: lidar_frame.get().to_string(),
             transform_tolerance: transform_tolerance.get(),
             publish_period: period_from_rate(publish_rate.get()),
             mode_poll_period: period_from_rate(mode_poll_rate.get()),
@@ -157,12 +180,15 @@ impl Parameters {
 
         log_info!(
             node.logger(),
-            "[Parameters] robot_id: '{}', map: '{}', TF {} -> {} (tolerance {:.2} s)",
+            "[Parameters] robot_id: '{}', map: '{}', TF {} -> {} (tolerance {:.2} s), height \
+             through {} / {}",
             config.robot_id,
             config.map,
             config.global_frame,
             config.base_frame,
             config.transform_tolerance,
+            config.body_frame,
+            config.lidar_frame,
         );
         log_info!(
             node.logger(),
@@ -180,6 +206,8 @@ impl Parameters {
                 _map: map,
                 _global_frame: global_frame,
                 _base_frame: base_frame,
+                _body_frame: body_frame,
+                _lidar_frame: lidar_frame,
                 _transform_tolerance: transform_tolerance,
                 _publish_rate: publish_rate,
                 _mode_poll_rate: mode_poll_rate,
