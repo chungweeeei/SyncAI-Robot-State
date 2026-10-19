@@ -21,12 +21,13 @@
     global_frame: "map"
     base_frame: "base_link"
     # The height is NOT taken from that lookup: syncai_lio_bridge broadcasts map -> base_link
-    # planar, so its z is 0 on every storey. It is read through Point-LIO's body frame (= the
-    # lidar, map -> pointlio_odom -> pointlio_body) and the URDF's base_link -> lidar_top instead,
-    # falling back to the planar z with a warning while that chain is missing. Not in the C++
-    # version.
+    # planar, so its z is 0 on every storey. It is read through Point-LIO's body frame (the
+    # lidar's built-in IMU, map -> pointlio_odom -> pointlio_body) and the URDF's
+    # base_link -> lidar_top_imu instead, falling back to the planar z with a warning while that
+    # chain is missing. Not in the C++ version. lidar_frame was lidar_top until 2026-10, when
+    # syncai_bringup split the lidar (lidar_top) from its IMU (lidar_top_imu, t_il ~5 cm away).
     body_frame: "pointlio_body"
-    lidar_frame: "lidar_top"
+    lidar_frame: "lidar_top_imu"
     # TF lookup tolerance in seconds.
     #
     # Carried for parity with the C++ version, where it has no effect either: the lookup is gated

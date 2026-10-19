@@ -26,7 +26,7 @@ One node that aggregates the robot's scattered status sources into a single
 
 ```
     TF: map -> <robot_id>/base_link  ────┐   (syncai_localizer + syncai_lio_bridge)
-    TF: map -> <robot_id>/pointlio_body ─┤   (z only: syncai_localizer + Point-LIO, via lidar_top)
+    TF: map -> <robot_id>/pointlio_body ─┤   (z only: syncai_localizer + Point-LIO, via lidar_top_imu)
     odom          (nav_msgs/Odometry) ───┤
     battery_state (BatteryState)  ───────┼──►  syncai_robot_state  ──► robot_state ──► syncai_backend
     wifi_status   (WifiStatus)    ───────┤          (1 Hz)                              (out of tree)
@@ -90,7 +90,7 @@ RELIABLE subscriber, so subscribing with the default rclcpp/rclpy QoS receives n
 | `global_frame` | `map` | — (stays unprefixed) |
 | `base_frame` | `base_link` | `<robot_id>/base_link` |
 | `body_frame` | `pointlio_body` | `<robot_id>/pointlio_body` (not in the C++ version) |
-| `lidar_frame` | `lidar_top` | `<robot_id>/lidar_top` (not in the C++ version) |
+| `lidar_frame` | `lidar_top_imu` | `<robot_id>/lidar_top_imu` (not in the C++ version; `lidar_top` until 2026-10) |
 | `transform_tolerance` | `0.1` | — (carried for parity; has no effect — see below) |
 | `publish_rate` | `10.0` Hz | — (params file only; **the shipped file says `1.0`**) |
 | `mode_poll_rate` | `1.0` Hz | — (params file only) |
@@ -180,7 +180,7 @@ ros2 run syncai_robot_state robot_state_node --ros-args -r __ns:=/default_robot 
 Expect `localization_valid: false` and `state: 0` (`UNINITIALIZED`) until something publishes
 `map -> base_link`, with every other field populated alongside. A fake `map -> base_link` alone
 reports its own z and a throttled "Height through the lidar unavailable" warning, since there is no
-`pointlio_body` / `lidar_top` behind it. To exercise the rest — note the
+`pointlio_body` / `lidar_top_imu` behind it. To exercise the rest — note the
 `<robot_id>` namespace, and use a separate `ROS_DOMAIN_ID` so this never reaches the real robot:
 
 ```bash
@@ -245,12 +245,16 @@ robot, the same split `protocol.rs` has in syncai_driver_manager.
   `odom -> base_link` and `map -> odom` planar for the 2D nav stack, so the chain the C++ reads
   reports z = 0 on every storey, and an upstairs robot reads as standing on the ground floor. The
   height is read instead through the one chain that still climbs, Point-LIO's
-  `map -> <robot_id>/pointlio_odom -> <robot_id>/pointlio_body` (the body frame is the lidar),
-  closed onto the base with the URDF's static `<robot_id>/base_link -> <robot_id>/lidar_top`:
+  `map -> <robot_id>/pointlio_odom -> <robot_id>/pointlio_body` (the body frame is the lidar's
+  built-in IMU), closed onto the base with the URDF's static
+  `<robot_id>/base_link -> <robot_id>/lidar_top_imu`:
   `map <- base = (map <- body) · (base <- lidar)⁻¹`, in full 3D, because once the base pitches on
   a stair the lidar's 0.195 m forward offset moves its height too. This is the same compose the
   backend's telemetry does in `TelemetrySubscriber._lio_odom_cb`. Two parameters name the frames,
   `body_frame` and `lidar_frame`, prefixed with `<robot_id>/` by the launch file like `base_frame`.
+  `lidar_frame` was `lidar_top` until 2026-10, when syncai_bringup's URDF split the lidar
+  (`lidar_top`, the frame its cloud is stamped with) from its IMU (`lidar_top_imu`, `-t_il` below
+  it); closing the IMU's chain through the lidar put the height ~4.5 cm off.
   * **x / y / yaw and `localization_valid` are unchanged**: they still come from
     `map -> base_link`, which is what the nav stack drives by. Only a failed planar lookup withholds
     the pose.

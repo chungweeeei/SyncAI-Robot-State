@@ -1,6 +1,6 @@
 # Launch the syncai_robot_state node — publishes syncai_common/RobotState at 1 Hz, with position
 # from TF (map -> <robot_id>/base_link, its height through <robot_id>/pointlio_body and
-# <robot_id>/lidar_top) and forward velocity from the odom topic.
+# <robot_id>/lidar_top_imu) and forward velocity from the odom topic.
 #
 # robot_id is read from the system config INI at launch time (same convention as
 # sys_manager.launch.py) and is used as the node namespace, as the `robot_id` node parameter, and
@@ -88,7 +88,10 @@ def launch_setup(context, *args, **kwargs):
         "robot_id": robot_id,
         "base_frame": f"{robot_id}/base_link",
         "body_frame": f"{robot_id}/pointlio_body",
-        "lidar_frame": f"{robot_id}/lidar_top",
+        # The lidar's IMU, not the lidar: Point-LIO's body frame is the IMU, so that is the link
+        # that closes the body chain back onto the base. syncai_bringup's G23.urdf has it as
+        # lidar_top_imu under lidar_top (the lidar) since 2026-10; lidar_top here was ~5 cm off.
+        "lidar_frame": f"{robot_id}/lidar_top_imu",
     }
     # Only override `map` when the INI actually provides one, so an absent [map] map leaves the
     # params-file default in place.

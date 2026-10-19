@@ -352,8 +352,9 @@ impl TfBuffer {
     /// On this stack `map -> <robot_id>/base_link` is planar: syncai_lio_bridge projects both
     /// `odom -> base_link` and `map -> odom` onto the ground plane for the 2D nav stack, so the z of
     /// that chain is 0 on every storey. The one chain that still climbs is Point-LIO's,
-    /// `map -> pointlio_odom -> pointlio_body`, whose body frame IS the lidar. Closing it with the
-    /// URDF's mount extrinsic gives the real base pose:
+    /// `map -> pointlio_odom -> pointlio_body`, whose body frame is the lidar's built-in IMU.
+    /// Closing it with the URDF's static `base -> lidar_top_imu` (the lidar mount plus the IMU's
+    /// offset inside the lidar; `lidar` below) gives the real base pose:
     ///
     /// ```text
     /// target <- base  =  (target <- body) · (base <- lidar)⁻¹

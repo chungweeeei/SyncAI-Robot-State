@@ -48,11 +48,11 @@ pub struct Config {
     /// `body_frame` and `lidar_frame` with `<robot_id>/` and leaves `global_frame` as plain `map`.
     pub global_frame: String,
     pub base_frame: String,
-    /// Point-LIO's body frame, which is the lidar: the one chain whose z still climbs (see
-    /// `TfBuffer::height_through_lidar`).
+    /// Point-LIO's body frame, which is the lidar's built-in IMU: the one chain whose z still
+    /// climbs (see `TfBuffer::height_through_lidar`).
     pub body_frame: String,
-    /// The URDF's lidar link, whose static `base_frame -> lidar_frame` closes the body chain back
-    /// onto the base.
+    /// The URDF's link for that IMU (`lidar_top_imu`), whose static `base_frame -> lidar_frame`
+    /// closes the body chain back onto the base.
     pub lidar_frame: String,
     pub transform_tolerance: f64,
     pub publish_period: Duration,
@@ -118,14 +118,14 @@ impl Parameters {
         let body_frame = text(
             "body_frame",
             "pointlio_body",
-            "Point-LIO body (= lidar) TF frame the robot's height is read through; the launch file \
-             prefixes it with <robot_id>/",
+            "Point-LIO body (= the lidar's IMU) TF frame the robot's height is read through; the \
+             launch file prefixes it with <robot_id>/",
         )?;
         let lidar_frame = text(
             "lidar_frame",
-            "lidar_top",
-            "URDF lidar link that ties body_frame back to base_frame; the launch file prefixes it \
-             with <robot_id>/",
+            "lidar_top_imu",
+            "URDF link of the lidar's IMU that ties body_frame back to base_frame; the launch file \
+             prefixes it with <robot_id>/",
         )?;
         let transform_tolerance = number(
             "transform_tolerance",

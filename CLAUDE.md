@@ -8,8 +8,8 @@ executable `robot_state_node`, parameter names, topics, message types, QoS, the 
 `syncai_backend` depends on it. There are two deliberate exceptions. The `safety_locked`
 subscription feeding `low_level_mode.safety_state`, which the C++ version lacks because the topic
 itself is Rust-only in syncai_driver_manager. And `localization_status.position.z`, read through
-Point-LIO's body frame and the lidar mount (two more frame parameters, `body_frame` /
-`lidar_frame`) because the planar `map -> base_link` both versions take x / y / yaw from reports 0
+Point-LIO's body frame and the URDF's link for it, the lidar's IMU (two more frame parameters,
+`body_frame` / `lidar_frame` = `lidar_top_imu`) because the planar `map -> base_link` both versions take x / y / yaw from reports 0
 on every storey. Any further deviation goes in the same README list. When behaviour is in doubt, the C++ version is authoritative; the
 README's "Differences from the C++ version" lists every knowing deviation and must stay complete.
 
