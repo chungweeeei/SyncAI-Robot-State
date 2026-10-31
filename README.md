@@ -86,7 +86,7 @@ RELIABLE subscriber, so subscribing with the default rclcpp/rclpy QoS receives n
 | Parameter | Default | Set by the launch file |
 |---|---|---|
 | `robot_id` | `""` (yaml: `default_robot`) | `[system] robot_id` from the INI |
-| `map` | `""` (yaml: `dp2f_full`) | `[map] map` from the INI, when present — a *path*, not a name |
+| `map` | `""` | `[map] name` from the INI (an older INI's `[map] map` path → its directory name; no map named → `""`) |
 | `global_frame` | `map` | — (stays unprefixed) |
 | `base_frame` | `base_link` | `<robot_id>/base_link` |
 | `body_frame` | `pointlio_body` | `<robot_id>/pointlio_body` (not in the C++ version) |
@@ -209,7 +209,7 @@ best-effort.
 ├── package.xml
 ├── Cargo.toml / Cargo.lock
 ├── rustfmt.toml / clippy.toml / .editorconfig
-├── launch/robot_state.launch.py    # reads robot_id (and [map] map) from system.ini
+├── launch/robot_state.launch.py    # reads robot_id (and [map] name) from system.ini
 ├── params/robot_state_params.yaml  # rates, frames, battery thresholds
 ├── src/
 │   ├── main.rs

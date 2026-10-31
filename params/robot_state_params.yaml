@@ -12,9 +12,10 @@
     # robot_id from config/system.ini; the values below are only fallbacks when the node is run
     # without it.
     robot_id: "default_robot"
-    # Map name stamped into RobotState.map. Usually overridden from the launch file, which takes
-    # [map] map from the INI — and that is a map YAML *path*, not a name.
-    map: "dp2f_full"
+    # Map name stamped into RobotState.map. The launch file overrides it with [map] name from the
+    # INI; empty here so a node run without it claims no map (this used to be "dp2f_full", which
+    # every robot published once the INI lost its [map] map key).
+    map: ""
     # TF frames used for the position lookup (global_frame -> base_frame). TF frame names are not
     # namespaced by ROS: global_frame stays "map" and base_frame gets the <robot_id>/ prefix at
     # launch, which is how robots sharing one /tf are kept apart.
