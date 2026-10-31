@@ -7,9 +7,11 @@
 # to rewrite the base_frame / body_frame / lidar_frame parameters, since TF frame names are not
 # namespaced by ROS. The global_frame stays "map".
 #
-# The same INI may provide a [map] section with a "map" key (the map YAML path); when present it
-# overrides the `map` node parameter so the published RobotState.map reflects the map this instance
-# loaded, without editing robot_state_params.yaml. This mirrors map_server.launch.py.
+# The same INI names the loaded map in [map] name; the launch passes it as the `map` node parameter,
+# so the published RobotState.map is the map this instance loaded, without editing
+# robot_state_params.yaml. It used to read [map] map (a gridmap.yaml path, from map_server's era);
+# the workspace dropped that key on 2026-10-28 with 2D navigation, after which every robot
+# published the params file's stale default (dp2f_full) whatever map it had loaded.
 
 import configparser
 import os
@@ -51,25 +53,32 @@ def read_robot_id(config_path: str) -> str:
     return robot_id
 
 
-def read_map(config_path: str) -> str:
-    """Read the [map] "map" key (the map YAML path) from the INI.
+def read_map(config_path: str) -> str | None:
+    """The loaded map's bare name from the INI, as the workspace's launch files and the backend
+    read it.
 
-    Returns the raw value, or "" when the section or key is absent (the params-file `map` default
-    then applies unchanged).
+    [map] name first. An older INI with no `name` key falls back to the parent directory of its
+    [map] map path (map/dp2f/gridmap.yaml -> dp2f), the backend's same fallback. An INI that names
+    no map (an empty `name:` is a robot with no map yet, the first deployment's INI) returns "":
+    RobotState.map is then empty rather than some other map's name. None only when the INI cannot
+    be read, which leaves the params-file `map` in place.
     """
     config = configparser.ConfigParser()
     if not config.read(config_path):
+        return None
+
+    name = config.get("map", "name", fallback="").strip()
+    if not name:
+        yaml_path = config.get("map", "map", fallback="").strip()
+        if yaml_path:
+            name = os.path.basename(os.path.dirname(yaml_path))
+
+    if not name:
+        logger.info(f"No [map] name in '{config_path}'; publishing an empty RobotState.map")
         return ""
 
-    map_value = config.get("map", "map", fallback="").strip()
-    if not map_value:
-        logger.info(
-            f"No [map] map in '{config_path}'; using the map value from the params file"
-        )
-        return ""
-
-    logger.info(f"Map from '{config_path}': {map_value}")
-    return map_value
+    logger.info(f"Map from '{config_path}': {name}")
+    return name
 
 
 def launch_setup(context, *args, **kwargs):
@@ -93,9 +102,9 @@ def launch_setup(context, *args, **kwargs):
         # lidar_top_imu under lidar_top (the lidar) since 2026-10; lidar_top here was ~5 cm off.
         "lidar_frame": f"{robot_id}/lidar_top_imu",
     }
-    # Only override `map` when the INI actually provides one, so an absent [map] map leaves the
-    # params-file default in place.
-    if map_value:
+    # An INI with no map overrides too (with ""), so a stale params-file value is never published
+    # for a robot that has none; only an unreadable INI leaves the params file's value.
+    if map_value is not None:
         overrides["map"] = map_value
 
     # No `name=`: the node is constructed as "syncai_robot_state", and the params file uses a bare

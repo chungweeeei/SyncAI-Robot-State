@@ -41,8 +41,8 @@ pub fn period_from_rate(rate_hz: f64) -> Duration {
 /// declared when the supplied pair was rejected.
 pub struct Config {
     pub robot_id: String,
-    /// Stamped into `RobotState.map`. Despite the name the launch file usually puts a *path* here
-    /// (the map YAML from the INI's `[map] map`), which goes through to the REST payload verbatim.
+    /// Stamped into `RobotState.map`: the loaded map's bare name, from the INI's `[map] name` by
+    /// way of the launch file (empty when the robot has no map), verbatim into the REST payload.
     pub map: String,
     /// TF frame names are not namespaced by ROS; the launch file prefixes `base_frame`,
     /// `body_frame` and `lidar_frame` with `<robot_id>/` and leaves `global_frame` as plain `map`.
