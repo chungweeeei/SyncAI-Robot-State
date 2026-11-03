@@ -30,7 +30,7 @@ One node that aggregates the robot's scattered status sources into a single
     odom          (nav_msgs/Odometry) ───┤
     battery_state (BatteryState)  ───────┼──►  syncai_robot_state  ──► robot_state ──► syncai_backend
     wifi_status   (WifiStatus)    ───────┤          (1 Hz)                              (out of tree)
-    motor_states  (MotorStates)   ───────┤                                                   │
+    motor_states_low_rate (20 Hz) ───────┤                                                   │
     mode          (Int32MultiArray) ─────┤                                                   │
     safety_locked (Bool, latched) ───────┤                                                   ▼
     get_mode      (service, polled) ─────┘                                    GET /api/v1/robot/state
@@ -57,7 +57,7 @@ name (`<robot_id>/base_link`) instead.
 | Subscribe | `odom` | `nav_msgs/Odometry` | SensorData |
 | Subscribe | `battery_state` | `sensor_msgs/BatteryState` | SensorData |
 | Subscribe | `wifi_status` | `syncai_common/WifiStatus` | BEST_EFFORT, VOLATILE, KeepLast(1) |
-| Subscribe | `motor_states` | `syncai_common/MotorStates` | SensorData |
+| Subscribe | `motor_states_low_rate` | `syncai_common/MotorStates` | SensorData. driver_manager's 20 Hz copy of `motor_states` (~200 Hz), since 2026-11: only the latest sample is used |
 | Subscribe | `mode` | `std_msgs/Int32MultiArray` | RELIABLE, VOLATILE, KeepLast(10) |
 | Subscribe | `safety_locked` | `std_msgs/Bool` | RELIABLE, TRANSIENT_LOCAL, KeepLast(1) |
 | Subscribe | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | KeepLast(100), reliable; `/tf_static` also TRANSIENT_LOCAL |
