@@ -70,9 +70,13 @@ impl Subscriptions {
                 },
             )?,
 
-            // From syncai_driver_manager. SensorData to match its publisher.
+            // From syncai_driver_manager. SensorData to match its publisher. The 20 Hz
+            // motor_states_low_rate, not the ~200 Hz motor_states: only the latest sample is
+            // kept for the 1 Hz RobotState, so the full rate was ~200 deserialisations a second
+            // to use one (2026-11, CPU load). Needs a driver_manager that publishes it — against
+            // an older one motor_status stays empty, with no error.
             _motor_states: worker.create_subscription(
-                "motor_states".sensor_data_qos(),
+                "motor_states_low_rate".sensor_data_qos(),
                 |data: &mut RobotStateData, msg: MotorStates| {
                     data.accept_motor_states(msg);
                 },
