@@ -16,6 +16,7 @@ use ros_env::std_msgs::msg::{Bool, Int32MultiArray};
 use ros_env::syncai_common::msg::{MotorStates, WifiStatus};
 use ros_env::tf2_msgs::msg::TFMessage;
 
+use super::health::ChargeReading;
 use super::state::RobotStateData;
 use super::tf::{Quaternion, Transform};
 use super::wifi::WifiInfo;
@@ -52,7 +53,12 @@ impl Subscriptions {
             _battery_state: worker.create_subscription(
                 "battery_state".sensor_data_qos(),
                 |data: &mut RobotStateData, msg: BatteryState| {
-                    data.accept_battery(msg.percentage);
+                    let charge = match msg.power_supply_status {
+                        BatteryState::POWER_SUPPLY_STATUS_CHARGING => ChargeReading::Charging,
+                        BatteryState::POWER_SUPPLY_STATUS_DISCHARGING => ChargeReading::Discharging,
+                        _ => ChargeReading::Neither,
+                    };
+                    data.accept_battery(msg.percentage, charge);
                 },
             )?,
 

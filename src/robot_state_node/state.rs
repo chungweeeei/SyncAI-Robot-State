@@ -12,7 +12,7 @@ use ros_env::syncai_common::msg::{
 };
 use std::time::Duration;
 
-use super::health::{LatchChange, LowBatteryLatch};
+use super::health::{self, ChargeReading, ChargingLatch, LatchChange, LowBatteryLatch, Status};
 use super::mode_poll::ModePoll;
 use super::parameters::Config;
 use super::tf::{InvalidTransform, ReportedPose, TfBuffer, Transform};
@@ -43,6 +43,10 @@ pub struct RobotStateData {
     odom_velocity: Option<f64>,
     /// Already scaled to the 0-100 this message reports; `sensor_msgs/BatteryState` is 0-1.
     battery_percentage: Option<f64>,
+    /// Engaged by a CHARGING `battery_state`, released by a DISCHARGING one ([`ChargingLatch`]
+    /// has why). Clear until a sample arrives: with no battery report the robot is not known to
+    /// be charging.
+    charging: ChargingLatch,
     wifi: Option<WifiInfo>,
     /// Kept whole, not picked apart: `motor_status` IS a MotorStates, so the array and the instant
     /// it describes cannot be copied independently or get out of step.
@@ -80,6 +84,7 @@ impl RobotStateData {
             latch: LowBatteryLatch::default(),
             odom_velocity: None,
             battery_percentage: None,
+            charging: ChargingLatch::default(),
             wifi: None,
             motor_states: None,
             low_level_mode: RobotLowLevelMode::default(),
@@ -98,8 +103,23 @@ impl RobotStateData {
     /// The scaling round-trips: syncai_driver_manager divides the BMS's 0-100 SoC by 100 to build
     /// the message, and this multiplies it back. Changing one side without the other gives a
     /// reading off by 100x.
-    pub fn accept_battery(&mut self, percentage: f32) {
+    ///
+    /// `charge` is its `power_supply_status`, which advances the [`ChargingLatch`]. Logged on a
+    /// change of the latch only.
+    pub fn accept_battery(&mut self, percentage: f32, charge: ChargeReading) {
         self.battery_percentage = Some(f64::from(percentage) * 100.0);
+        if let Some(charging) = self.charging.update(charge) {
+            log_info!(
+                &self.logger,
+                "[RobotStateNode] battery {} at {:.1}%",
+                if charging {
+                    "charging; state -> CHARGING"
+                } else {
+                    "discharging; no longer CHARGING"
+                },
+                f64::from(percentage) * 100.0,
+            );
+        }
     }
 
     pub fn accept_wifi(&mut self, info: WifiInfo) {
@@ -293,22 +313,20 @@ impl RobotStateData {
             }
         }
 
-        // State derivation, most-severe-first. UNINITIALIZED wins over WARNING because "we do not
-        // know where the robot is" is the more fundamental fact — a low battery is worth
-        // reporting, but not at the cost of hiding that the pose in this very message is a zero
-        // placeholder. Consumers that need the precise answer read localization_valid; state is
-        // the coarse rollup of it.
+        // State derivation, most-severe-first (health::derive_status has the precedence and
+        // why). Consumers that need the precise answer read localization_valid; state is the
+        // coarse rollup of it.
         //
-        // TODO: RUNNING and ERROR are not derived yet. CHARGING cannot be: syncai_driver_manager
-        //       hardcodes BatteryState.power_supply_status to UNKNOWN, and the only other
-        //       candidate is the sign of `current`, whose convention is undocumented in both this
-        //       port and the reference implementation.
-        msg.state = if !msg.localization_valid {
-            RobotStatus::UNINITIALIZED
-        } else if self.latch.is_engaged() {
-            RobotStatus::WARNING
-        } else {
-            RobotStatus::IDLE
+        // TODO: RUNNING and ERROR are not derived yet.
+        msg.state = match health::derive_status(
+            msg.localization_valid,
+            self.charging.is_engaged(),
+            self.latch.is_engaged(),
+        ) {
+            Status::Uninitialized => RobotStatus::UNINITIALIZED,
+            Status::Charging => RobotStatus::CHARGING,
+            Status::Warning => RobotStatus::WARNING,
+            Status::Idle => RobotStatus::IDLE,
         };
 
         // Forward speed only (linear.x), not the speed magnitude: negative when reversing, and
