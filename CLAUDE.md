@@ -137,5 +137,5 @@ justify it — it would buy a lock and nothing else.
 - `syncai_common` is another repo that vcstool pulls into the container workspace (it is not in
   this repo); change message definitions in SyncAI-Robot-Interface.
 - Known open questions, inherited from the C++ version: `RUNNING` / `ERROR` are never derived,
-  `CHARGING` cannot be derived at all, and `low_level_mode` carries no freshness information. The
+  and `low_level_mode` carries no freshness information. The
   README's "Known limits" section records why each one is still open.

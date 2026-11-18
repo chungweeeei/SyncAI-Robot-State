@@ -41,7 +41,7 @@ since 2026-09, so this topic is a cross-repository contract: widening a field is
 removing one is not.
 
 It derives very little: a yaw extraction, the height through the lidar, a unit conversion, the
-localization-validity flag and one latched threshold (low battery → `WARNING`). It holds no state beyond the latest sample of each
+localization-validity flag, one latched threshold (low battery → `WARNING`) and the battery's charge status (→ `CHARGING`). It holds no state beyond the latest sample of each
 input and that one latch. **It only ever reports** — no threshold here commands the robot to do
 anything.
 
@@ -103,18 +103,26 @@ startup and both fall back to 20/25.
 
 ### The `state` derivation
 
-Three of the six `RobotStatus` values are emitted, most-severe-first:
+Four of the six `RobotStatus` values are emitted, most-severe-first (`health::derive_status`):
 
 | `state` | Condition |
 |---|---|
 | `UNINITIALIZED` | `map → base_link` TF unavailable |
+| `CHARGING` | latched: engaged by a `battery_state` reading `POWER_SUPPLY_STATUS_CHARGING`, released only by one reading `DISCHARGING` |
 | `WARNING` | battery below the low-battery threshold (latched, with hysteresis) |
 | `IDLE` | otherwise |
 
-`UNINITIALIZED` outranks `WARNING` on purpose: "we don't know where the robot is" is the more
+`UNINITIALIZED` outranks the rest on purpose: "we don't know where the robot is" is the more
 fundamental fact, and hiding it would leave `localization_status` reading as a pose when it is a
-zero placeholder. `RUNNING` and `ERROR` are not derived yet; `CHARGING` cannot be, because
-`syncai_driver_manager` hardcodes `BatteryState.power_supply_status` to `UNKNOWN`.
+zero placeholder. `CHARGING` outranks `WARNING`: a low pack on its charger is what is being
+fixed. `CHARGING` is syncai_driver_manager's: it derives `power_supply_status` from the sign of
+the pack's **net** current with a 0.1 A deadband, so it means the charger delivers more than the
+robot draws. A nearly full pack's current tapers into that deadband (`NOT_CHARGING`) with the
+robot still on its charger, so the state is latched (`health::ChargingLatch`): it holds through
+`NOT_CHARGING` and drops on the first `DISCHARGING`, which a robot taken off the charger reads
+as soon as it draws its own load. Not a percentage rule: this node does not know the robot is on
+a charger, and a full robot idling elsewhere must not read `CHARGING`. No freshness rule, as for
+every other input: a driver that stops publishing leaves the last status in place. `RUNNING` and `ERROR` are not derived yet.
 
 ## Why Docker
 
@@ -234,6 +242,11 @@ robot, the same split `protocol.rs` has in syncai_driver_manager.
 
 ## Differences from the C++ version
 
+* **`state` can be `CHARGING`** (2026-11-18), from `battery_state.power_supply_status`, outranking
+  `WARNING`. The C++ version never emits it: when it was written syncai_driver_manager hardcoded
+  that status to `UNKNOWN`; the Rust driver_manager derives it from the current's sign. Same
+  field, same constant (`RobotStatus.CHARGING` = 5, declared since the renumbering), so nothing
+  needs a rebuild.
 * **`safety_locked` is subscribed, and `low_level_mode.safety_state` is filled from it.** The one
   deliberate widening of the interface: the C++ version has neither, because the topic itself is a
   Rust-only addition in syncai_driver_manager. It needs `syncai_common` at or after

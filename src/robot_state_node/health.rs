@@ -1,4 +1,5 @@
-//! The low-battery latch — the node's only derived state beyond the latest sample of each input.
+//! The two latches — low battery and charging, the node's only derived state beyond the latest
+//! sample of each input — and the `state` rollup that reads them.
 //!
 //! Pure: no ROS types, no clock, no logging. The caller decides what to say about the
 //! [`LatchChange`] it gets back.
@@ -146,9 +147,143 @@ impl LowBatteryLatch {
     }
 }
 
+/// What one `battery_state` says about charging: its `power_supply_status`, reduced to the two
+/// values the [`ChargingLatch`] acts on. Kept free of the message's constants, as [`Status`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChargeReading {
+    /// `POWER_SUPPLY_STATUS_CHARGING`: the pack's net current over +0.1 A.
+    Charging,
+    /// `POWER_SUPPLY_STATUS_DISCHARGING`: the net current under -0.1 A.
+    Discharging,
+    /// Anything else, chiefly `NOT_CHARGING`: the current inside the deadband.
+    Neither,
+}
+
+/// Latched "on the charger" (2026-11-18), driving `state = CHARGING`.
+///
+/// syncai_driver_manager derives `power_supply_status` from the sign of the pack's NET current
+/// with a 0.1 A deadband (`ChargeState::from_current`). A nearly full pack's charge current
+/// tapers into that deadband with the contacts still made, so a bare reading would drop a robot
+/// that is sitting on its charger from `CHARGING` to `IDLE` as it fills.
+///
+/// So it engages on a `Charging` reading and releases only on a `Discharging` one: a robot taken
+/// off the charger draws its own load and reads `Discharging` within a sample. Not a percentage
+/// rule (`charge.xml`'s WaitForCharging accepts "not discharging above 95 %" because it knows the
+/// robot has just lain down on the charger; this node does not, and a full robot standing idle
+/// elsewhere would read `CHARGING` by it). The price: a robot whose current sits in the deadband
+/// for some other reason after a charge keeps reading `CHARGING` until it next discharges.
+#[derive(Default)]
+pub struct ChargingLatch {
+    engaged: bool,
+}
+
+impl ChargingLatch {
+    pub fn is_engaged(&self) -> bool {
+        self.engaged
+    }
+
+    /// Advance the latch; `Some(new value)` when it changed.
+    pub fn update(&mut self, reading: ChargeReading) -> Option<bool> {
+        let next = match reading {
+            ChargeReading::Charging => true,
+            ChargeReading::Discharging => false,
+            ChargeReading::Neither => self.engaged,
+        };
+        if next == self.engaged {
+            None
+        } else {
+            self.engaged = next;
+            Some(next)
+        }
+    }
+}
+
+/// The coarse `state` rollup, one variant per `RobotStatus` value this node emits. Kept free of
+/// the message's constants so the precedence can be tested without ROS; `state.rs` maps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Uninitialized,
+    Charging,
+    Warning,
+    Idle,
+}
+
+/// Most-severe-first.
+///
+/// `Uninitialized` outranks everything: "we do not know where the robot is" is the more
+/// fundamental fact, and hiding it would leave the zeroed pose in the same message reading as one.
+///
+/// `Charging` outranks `Warning` (2026-11-18): a low pack on its charger is the problem being
+/// solved, not one to raise. The low-battery latch keeps running underneath, so a robot taken
+/// off the charger still low reads `Warning` again on the next tick.
+///
+/// `charging` is the [`ChargingLatch`]: engaged by the charger delivering more than the robot
+/// draws, held through the taper of a filling pack.
+pub fn derive_status(localization_valid: bool, charging: bool, low_battery: bool) -> Status {
+    if !localization_valid {
+        Status::Uninitialized
+    } else if charging {
+        Status::Charging
+    } else if low_battery {
+        Status::Warning
+    } else {
+        Status::Idle
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_charging_latch_engages_only_on_a_charge_current() {
+        let mut latch = ChargingLatch::default();
+        // A full robot standing idle, its current in the deadband, has not been seen charging
+        assert_eq!(latch.update(ChargeReading::Neither), None);
+        assert!(!latch.is_engaged());
+        assert_eq!(latch.update(ChargeReading::Charging), Some(true));
+        assert!(latch.is_engaged());
+        assert_eq!(latch.update(ChargeReading::Charging), None);
+    }
+
+    #[test]
+    fn a_filling_pack_on_the_charger_stays_charging() {
+        let mut latch = ChargingLatch::default();
+        latch.update(ChargeReading::Charging);
+        // The charge current tapers into the deadband as the pack fills
+        assert_eq!(latch.update(ChargeReading::Neither), None);
+        assert!(latch.is_engaged());
+    }
+
+    #[test]
+    fn taken_off_the_charger_it_releases_on_the_first_discharge() {
+        let mut latch = ChargingLatch::default();
+        latch.update(ChargeReading::Charging);
+        latch.update(ChargeReading::Neither);
+        assert_eq!(latch.update(ChargeReading::Discharging), Some(false));
+        assert!(!latch.is_engaged());
+        assert_eq!(latch.update(ChargeReading::Neither), None);
+        assert!(!latch.is_engaged());
+    }
+
+    #[test]
+    fn an_unlocalized_robot_is_uninitialized_whatever_its_battery() {
+        assert_eq!(derive_status(false, true, true), Status::Uninitialized);
+        assert_eq!(derive_status(false, true, false), Status::Uninitialized);
+        assert_eq!(derive_status(false, false, true), Status::Uninitialized);
+    }
+
+    #[test]
+    fn charging_outranks_a_low_battery() {
+        assert_eq!(derive_status(true, true, true), Status::Charging);
+        assert_eq!(derive_status(true, true, false), Status::Charging);
+    }
+
+    #[test]
+    fn a_low_battery_off_the_charger_warns() {
+        assert_eq!(derive_status(true, false, true), Status::Warning);
+        assert_eq!(derive_status(true, false, false), Status::Idle);
+    }
 
     #[test]
     fn a_healthy_pack_leaves_the_latch_clear() {
