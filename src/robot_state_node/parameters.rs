@@ -58,6 +58,23 @@ pub struct Config {
     pub publish_period: Duration,
     pub mode_poll_period: Duration,
     pub battery_thresholds: Thresholds,
+    pub topics: Topics,
+}
+
+/// The input topics (2026-11-24), per robot model: params/models/<robot_model>.yaml sets them,
+/// since a robot whose drivers are not the G23's publishes its state elsewhere. Relative names
+/// resolve under the node's `<robot_id>` namespace, as the hard-coded ones did. An empty name
+/// skips that subscription (the M20's `mode`: nothing publishes it in a form this node reads),
+/// and the RobotState fields it feeds stay at their defaults, as they do while a publisher is
+/// missing. `/tf` and `/tf_static` are not here: they are global by definition.
+#[derive(Debug, Clone)]
+pub struct Topics {
+    pub odom: String,
+    pub battery_state: String,
+    pub wifi_status: String,
+    pub motor_states: String,
+    pub mode: String,
+    pub safety_locked: String,
 }
 
 /// The node's parameters, all of them load-time only.
@@ -83,6 +100,7 @@ pub struct Parameters {
     _mode_poll_rate: ReadOnlyParameter<f64>,
     _low_battery_warn_percentage: ReadOnlyParameter<f64>,
     _low_battery_clear_percentage: ReadOnlyParameter<f64>,
+    _topics: [ReadOnlyParameter<Arc<str>>; 6],
 }
 
 impl Parameters {
@@ -149,6 +167,41 @@ impl Parameters {
             health::DEFAULT_CLEAR_PERCENTAGE,
             "release the WARNING latch above this battery percentage (0-100)",
         )?;
+        // The input topics (see Topics). The defaults are the names hard-coded until 2026-11-24,
+        // the G23's, so a node run without a model file subscribes as it always did.
+        let topic = |name: &str, default: &str, from: &str| {
+            text(
+                name,
+                default,
+                &format!("{from} topic; relative = under <robot_id>, empty = not subscribed"),
+            )
+        };
+        let odom_topic = topic("odom_topic", "odom", "nav_msgs/Odometry (forward speed)")?;
+        let battery_state_topic = topic(
+            "battery_state_topic",
+            "battery_state",
+            "sensor_msgs/BatteryState",
+        )?;
+        let wifi_status_topic = topic(
+            "wifi_status_topic",
+            "wifi_status",
+            "syncai_common/WifiStatus",
+        )?;
+        let motor_states_topic = topic(
+            "motor_states_topic",
+            "motor_states_low_rate",
+            "syncai_common/MotorStates",
+        )?;
+        let mode_topic = topic(
+            "mode_topic",
+            "mode",
+            "std_msgs/Int32MultiArray (gait controller state)",
+        )?;
+        let safety_locked_topic = topic(
+            "safety_locked_topic",
+            "safety_locked",
+            "std_msgs/Bool (safety lock, latched)",
+        )?;
 
         let battery_thresholds = Thresholds::new(
             low_battery_warn_percentage.get(),
@@ -176,6 +229,14 @@ impl Parameters {
             publish_period: period_from_rate(publish_rate.get()),
             mode_poll_period: period_from_rate(mode_poll_rate.get()),
             battery_thresholds,
+            topics: Topics {
+                odom: odom_topic.get().to_string(),
+                battery_state: battery_state_topic.get().to_string(),
+                wifi_status: wifi_status_topic.get().to_string(),
+                motor_states: motor_states_topic.get().to_string(),
+                mode: mode_topic.get().to_string(),
+                safety_locked: safety_locked_topic.get().to_string(),
+            },
         };
 
         log_info!(
@@ -199,6 +260,18 @@ impl Parameters {
             config.battery_thresholds.warn(),
             config.battery_thresholds.clear(),
         );
+        // A topic left empty is logged by Subscriptions::create as skipped
+        log_info!(
+            node.logger(),
+            "[Parameters] topics: odom '{}', battery_state '{}', wifi_status '{}', \
+             motor_states '{}', mode '{}', safety_locked '{}'",
+            config.topics.odom,
+            config.topics.battery_state,
+            config.topics.wifi_status,
+            config.topics.motor_states,
+            config.topics.mode,
+            config.topics.safety_locked,
+        );
 
         Ok((
             Self {
@@ -213,6 +286,14 @@ impl Parameters {
                 _mode_poll_rate: mode_poll_rate,
                 _low_battery_warn_percentage: low_battery_warn_percentage,
                 _low_battery_clear_percentage: low_battery_clear_percentage,
+                _topics: [
+                    odom_topic,
+                    battery_state_topic,
+                    wifi_status_topic,
+                    motor_states_topic,
+                    mode_topic,
+                    safety_locked_topic,
+                ],
             },
             config,
         ))

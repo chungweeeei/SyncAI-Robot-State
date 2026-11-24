@@ -64,18 +64,26 @@ name (`<robot_id>/base_link`) instead.
 | Direction | Name | Type | QoS |
 |---|---|---|---|
 | Publish | `robot_state` | `syncai_common/RobotState` | BEST_EFFORT, VOLATILE, KeepLast(1) |
-| Subscribe | `odom` | `nav_msgs/Odometry` | SensorData |
-| Subscribe | `battery_state` | `sensor_msgs/BatteryState` | SensorData |
-| Subscribe | `wifi_status` | `syncai_common/WifiStatus` | BEST_EFFORT, VOLATILE, KeepLast(1) |
-| Subscribe | `motor_states_low_rate` | `syncai_common/MotorStates` | SensorData. driver_manager's 20 Hz copy of `motor_states` (~200 Hz), since 2026-11: only the latest sample is used |
-| Subscribe | `mode` | `std_msgs/Int32MultiArray` | RELIABLE, VOLATILE, KeepLast(10) |
-| Subscribe | `safety_locked` | `std_msgs/Bool` | RELIABLE, TRANSIENT_LOCAL, KeepLast(1) |
+| Subscribe | `odom_topic`: `odom` | `nav_msgs/Odometry` | SensorData |
+| Subscribe | `battery_state_topic`: `battery_state` | `sensor_msgs/BatteryState` | SensorData |
+| Subscribe | `wifi_status_topic`: `wifi_status` | `syncai_common/WifiStatus` | BEST_EFFORT, VOLATILE, KeepLast(1) |
+| Subscribe | `motor_states_topic`: `motor_states_low_rate` | `syncai_common/MotorStates` | SensorData. driver_manager's 20 Hz copy of `motor_states` (~200 Hz), since 2026-11: only the latest sample is used |
+| Subscribe | `mode_topic`: `mode` | `std_msgs/Int32MultiArray` | RELIABLE, VOLATILE, KeepLast(10) |
+| Subscribe | `safety_locked_topic`: `safety_locked` | `std_msgs/Bool` | RELIABLE, TRANSIENT_LOCAL, KeepLast(1) |
 | Subscribe | `localization_status` | `syncai_common/LocalizationStatus` | RELIABLE, TRANSIENT_LOCAL, KeepLast(1). The localizer's facts, published on a change only (2026-11) |
 | Subscribe | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | KeepLast(100), reliable; `/tf_static` also TRANSIENT_LOCAL |
 | Service | `set_robot_state` | `syncai_common/SetRobotState` | The operator's switch: confirm / withdraw the position, release an error |
 | Service | `begin_task` | `syncai_common/BeginTask` | May this task start? An acceptance is the transition to `RUNNING` |
 | Service | `end_task` | `syncai_common/EndTask` | How an accepted task ended; `FAILED` latches `ERROR` |
 | Service client | `get_mode` | `syncai_common/GetMode` | polled at `mode_poll_rate`, at most one request in flight |
+
+**Six topic names are parameters** (2026-11-24), set per robot model in
+`params/models/<robot_model>.yaml` (see "Parameters"); the names above are the G23's, and the code
+defaults. An empty name is **not subscribed**, logged once at startup
+(`[Subscriptions] mode: no topic set for this robot model, not subscribed`), and the RobotState
+fields it feeds stay at their defaults, as they do while a publisher is missing. The QoS of each
+is fixed in code whatever the name. `localization_status` is not one of them: it is the
+localizer's, in this stack on every model, and keeps its fixed relative name.
 
 `mode`, `safety_locked` and `localization_status` are **the only RELIABLE subscriptions in this
 node**, mirroring their publishers (`syncai_driver_manager`, and `syncai_localizer` for the last): both topics are edge-triggered rather than periodic, so a
@@ -108,12 +116,26 @@ RELIABLE subscriber, so subscribing with the default rclcpp/rclpy QoS receives n
 | `global_frame` | `map` | — (stays unprefixed) |
 | `base_frame` | `base_link` | `<robot_id>/base_link` |
 | `body_frame` | `pointlio_body` | `<robot_id>/pointlio_body` (not in the C++ version) |
-| `lidar_frame` | `lidar_top_imu` | `<robot_id>/lidar_top_imu` (not in the C++ version; `lidar_top` until 2026-10) |
+| `lidar_frame` | `lidar_top_imu` | `<robot_id>/` + the model file's value (G23 `lidar_top_imu`, M20 `lidar_link`; not in the C++ version; `lidar_top` until 2026-10) |
+| `odom_topic` … `safety_locked_topic` | the G23's names (table above) | — (the model file) |
 | `transform_tolerance` | `0.1` | — (carried for parity; has no effect — see below) |
 | `publish_rate` | `10.0` Hz | — (params file only; **the shipped file says `1.0`**) |
 | `mode_poll_rate` | `1.0` Hz | — (params file only) |
 | `low_battery_warn_percentage` | `20.0` % | — (params file only) |
 | `low_battery_clear_percentage` | `25.0` % | — (params file only) |
+
+**Per robot model** (2026-11-24, the layout `syncai_driver_manager` has): the launch reads
+`[system] robot_model` from the INI (`g23` when absent) and loads `params/models/<robot_model>.yaml`
+after `robot_state_params.yaml`, all three layers under `/**`, so a later one wins key by key. A
+model's file sets the six topics and `lidar_frame` (unprefixed; the launch adds `<robot_id>/`), and
+the launch **refuses** a model with no file or one that leaves one of them out: the code defaults
+are the G23's. `g23.yaml` holds the names hard-coded until then. `m20.yaml` (DEEP Robotics Lynx M20)
+keeps the same names — on robot01 only `wifi_status`, `safety_locked` (and `odom`, once
+`syncai_lio_bridge` runs) have a publisher; the vendor's battery and joint data are drdds types this
+node does not read — leaves `mode_topic` empty (the vendor's gait state is `drdds/MotionState`, only
+in the integrator's drdds), and sets `lidar_frame: lidar_link`, the vendor's merged-cloud frame at
+`base_link`'s origin, 0.0435 m below the M20's IMU that Point-LIO's body is: the reported height is
+that much off, `imu` is the exact link. A new model's file needs a colcon build.
 
 All are **load-time only** and declared read-only, so `ros2 param set` is rejected rather than
 silently ignored. A `low_battery_clear_percentage` at or below the warn value is rejected at
@@ -334,7 +356,8 @@ best-effort.
 ├── Cargo.toml / Cargo.lock
 ├── rustfmt.toml / clippy.toml / .editorconfig
 ├── launch/robot_state.launch.py    # reads robot_id (and [map] name) from system.ini
-├── params/robot_state_params.yaml  # rates, frames, battery thresholds
+├── params/robot_state_params.yaml  # rates, frames, battery thresholds (every model)
+├── params/models/<model>.yaml      # g23 / m20: input topics, lidar_frame
 ├── src/
 │   ├── main.rs
 │   └── robot_state_node/

@@ -1,4 +1,11 @@
-# Parameters for the syncai_robot_state node.
+# Parameters for the syncai_robot_state node that every robot model shares.
+#
+# What is one kind of robot's is in params/models/<robot_model>.yaml, loaded after this file by
+# robot_state.launch.py (robot_model from the system INI, g23 when absent), which refuses a model
+# with no file -- the layout syncai_driver_manager has (2026-11-24): the six input topics
+# (odom_topic, battery_state_topic, wifi_status_topic, motor_states_topic, mode_topic,
+# safety_locked_topic; empty = not subscribed) and lidar_frame, the URDF link the height chain
+# closes on.
 #
 # The key is a bare /** rather than the /**/syncai_robot_state the rclcpp version used: rclrs only
 # matches a params-file key that is exactly "/**" or exactly the node's fully-qualified name
@@ -28,7 +35,8 @@
     # chain is missing. Not in the C++ version. lidar_frame was lidar_top until 2026-10, when
     # syncai_bringup split the lidar (lidar_top) from its IMU (lidar_top_imu, t_il ~5 cm away).
     body_frame: "pointlio_body"
-    lidar_frame: "lidar_top_imu"
+    # lidar_frame: in the model's file (the G23's lidar_top_imu, the M20's lidar_link); the launch
+    # prefixes it with <robot_id>/.
     # TF lookup tolerance in seconds.
     #
     # Carried for parity with the C++ version, where it has no effect either: the lookup is gated

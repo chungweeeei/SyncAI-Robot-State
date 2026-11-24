@@ -1,0 +1,31 @@
+# The DEEP Robotics Lynx M20's inputs, over params/robot_state_params.yaml: loaded after it by
+# robot_state.launch.py when the system INI's [system] robot_model is m20.
+#
+# Bare /** key, as the shared file: rclrs does not expand /**/syncai_robot_state.
+/**:
+  ros__parameters:
+    # Same relative names as the G23's for now (robot01, 2026-11-24):
+    #   odom          syncai_lio_bridge, once it runs on the M20
+    #   battery_state NO publisher: syncai_driver_manager's m20 protocol publishes none; the
+    #                 vendor's /BATTERY_DATA is drdds/msg/BatteryData, which this node does not read
+    #   wifi_status   syncai_sys_manager, published
+    #   motor_states  NO publisher: the vendor's /JOINTS_DATA_10HZ is drdds/msg/JointsData
+    #   safety_locked syncai_driver_manager, published
+    # A topic with no publisher leaves its RobotState fields at their defaults; a source that
+    # republishes the vendor's data in these types is a change of name here only.
+    odom_topic: "odom"
+    battery_state_topic: "battery_state"
+    wifi_status_topic: "wifi_status"
+    motor_states_topic: "motor_states_low_rate"
+    # Skipped: the gait state is the vendor's /MOTION_STATE, whose type (drdds/msg/MotionState)
+    # is only in the integrator's drdds, not DEEP Robotics' sdk_deploy this stack builds.
+    # RobotState.low_level_mode's policy / motion states stay 0.
+    mode_topic: ""
+    safety_locked_topic: "safety_locked"
+
+    # The URDF link that closes the height chain (map -> pointlio_body, then base_link ->
+    # lidar_frame). lidar_link: the vendor's merged-cloud frame at base_link's origin in M20.urdf.
+    # Point-LIO's body frame on the M20 is its IMU, though, which M20.urdf has as `imu`, 0.0435 m
+    # above lidar_link: the height RobotState reports is that much off. `imu` is the exact link
+    # if it matters.
+    lidar_frame: "lidar_link"

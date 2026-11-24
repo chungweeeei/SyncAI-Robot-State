@@ -126,6 +126,10 @@ justify it — it would buy a lock and nothing else.
   and shadow. Verified to build against it with nothing added to the image.
 - `launch/` and `params/` are installed to share via `[package.metadata.ros] install_to_share` in
   `Cargo.toml`.
+- **Per robot model** (2026-11-24): `params/models/<robot_model>.yaml` (g23, m20) holds the six input
+  topics and `lidar_frame`; the launch loads it after `robot_state_params.yaml` (`robot_model` from
+  the INI, g23 when absent) and refuses a missing file or key. An empty topic is not subscribed
+  (`Subscriptions`, `Option<WorkerSubscription>`). All layers are `/**`; README "Parameters".
 
 ## Conventions
 

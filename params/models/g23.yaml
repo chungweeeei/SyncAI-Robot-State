@@ -1,0 +1,19 @@
+# The G23's inputs, over params/robot_state_params.yaml: loaded after it by robot_state.launch.py
+# when the system INI's [system] robot_model is g23 (or names none). The values are the ones
+# hard-coded until 2026-11-24.
+#
+# Bare /** key, as the shared file: rclrs does not expand /**/syncai_robot_state.
+/**:
+  ros__parameters:
+    # Relative: under /<robot_id>, where each publisher is.
+    odom_topic: "odom"                              # syncai_lio_bridge
+    battery_state_topic: "battery_state"            # syncai_driver_manager
+    wifi_status_topic: "wifi_status"                # syncai_sys_manager
+    motor_states_topic: "motor_states_low_rate"     # syncai_driver_manager, 20 Hz
+    mode_topic: "mode"                              # syncai_driver_manager
+    safety_locked_topic: "safety_locked"            # syncai_driver_manager
+
+    # The URDF link that closes the height chain (map -> pointlio_body, then base_link ->
+    # lidar_frame): Point-LIO's body frame is the MID360's IMU, which syncai_bringup's G23.urdf has
+    # as lidar_top_imu under lidar_top. The launch prefixes it with <robot_id>/.
+    lidar_frame: "lidar_top_imu"

@@ -69,6 +69,8 @@ impl RobotStateNode {
         let (parameters, config) = Parameters::declare(&node)?;
         let publish_period = config.publish_period;
         let mode_poll_period = config.mode_poll_period;
+        // Cloned before config moves into the worker's payload
+        let topics = config.topics.clone();
 
         // Relative name, so it lands on <robot_id>/robot_state and stays inside this robot's
         // namespace like every other topic in the stack.
@@ -89,7 +91,7 @@ impl RobotStateNode {
             ModePoll::create(&node)?,
         ));
 
-        let subscriptions = Subscriptions::create(&worker)?;
+        let subscriptions = Subscriptions::create(&worker, &topics, node.logger())?;
         let services = Services::create(&worker)?;
         let timers = Timers::create(&worker, publish_period, mode_poll_period)?;
 
