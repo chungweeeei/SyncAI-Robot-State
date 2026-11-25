@@ -85,7 +85,7 @@ pub enum NotConverged {
     /// The localizer runs with no map.
     NoMap,
     /// A guess is pending, or the last one was withdrawn without converging.
-    GuessNotConverged,
+    GuessPending,
 }
 
 /// What an operator's switch let go of, for the log line.
@@ -178,7 +178,7 @@ impl Lifecycle {
         match &self.localization {
             None => Err(NotConverged::NoLocalizer),
             Some(localization) if localization.map.is_empty() => Err(NotConverged::NoMap),
-            Some(localization) if !localization.converged => Err(NotConverged::GuessNotConverged),
+            Some(localization) if !localization.converged => Err(NotConverged::GuessPending),
             Some(localization) => Ok(localization.epoch),
         }
     }
@@ -300,7 +300,7 @@ impl Lifecycle {
                     "The robot has no position estimate yet.".to_owned()
                 }
                 Err(NotConverged::NoMap) => "No map is loaded.".to_owned(),
-                Err(NotConverged::GuessNotConverged) => {
+                Err(NotConverged::GuessPending) => {
                     "The robot has not found its position on the map. Set an initial pose."
                         .to_owned()
                 }
@@ -323,7 +323,7 @@ impl NotConverged {
                 "The position cannot be confirmed: the robot has no position estimate yet."
             }
             NotConverged::NoMap => "The position cannot be confirmed: no map is loaded.",
-            NotConverged::GuessNotConverged => {
+            NotConverged::GuessPending => {
                 "The position cannot be confirmed: the robot has not found its position on the \
                  map. Set an initial pose first."
             }
@@ -396,7 +396,7 @@ mod tests {
         lifecycle.accept_localization(located(2, false));
         assert_eq!(
             lifecycle.set_state(Target::Idle),
-            Err(NotConverged::GuessNotConverged)
+            Err(NotConverged::GuessPending)
         );
         assert!(!lifecycle.is_confirmed());
 
@@ -568,7 +568,7 @@ mod tests {
         lifecycle.accept_localization(located(8, false));
         assert_eq!(
             lifecycle.set_state(Target::Idle),
-            Err(NotConverged::GuessNotConverged)
+            Err(NotConverged::GuessPending)
         );
         assert!(lifecycle.fault().is_some());
     }
