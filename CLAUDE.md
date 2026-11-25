@@ -70,16 +70,18 @@ fakes cannot reach anything real.
 
 | File | Responsibility |
 | --- | --- |
-| `mod.rs` | Wiring: parameters → publisher → one worker → eight subscriptions + two timers |
+| `mod.rs` | Wiring: parameters → publisher → one worker → nine subscriptions + three services + two timers |
 | `parameters.rs` | The eleven load-time parameters (all read-only), and Hz -> period |
-| `state.rs` | The worker payload, sample intake, the latch tick and `build_state()` |
-| `subscribers.rs` | The eight subscriptions and their QoS |
+| `state.rs` | The worker payload, sample intake, the three service handlers, the latch tick and `build_state()` |
+| `subscribers.rs` | The nine subscriptions and their QoS |
+| `services.rs` | `set_robot_state` / `begin_task` / `end_task`, on the same worker |
+| `lifecycle.rs` | **Pure** state machine: the operator's confirmation (a remembered `pose_epoch`), the running task, the latched failure; unit-tested |
 | `mode_poll.rs` | The `get_mode` client poll, its in-flight guard and the mode cache |
 | `tf.rs` | **Pure** TF buffer + lookup replacing `tf2_ros`; no ROS types, all unit-tested |
-| `health.rs` | **Pure** low-battery hysteresis latch; unit-tested |
+| `health.rs` | **Pure** battery latches and the `state` rollup (`derive_status`); unit-tested |
 | `wifi.rs` | **Pure** `WifiStatus` -> `wifi_info` JSON string; unit-tested |
 
-New logic that can be expressed over plain Rust types goes in `tf.rs` / `health.rs` / `wifi.rs`
+New logic that can be expressed over plain Rust types goes in `tf.rs` / `health.rs` / `lifecycle.rs` / `wifi.rs`
 with unit tests; the ROS messages are converted at the subscription boundary so those tests need
 neither a ROS environment nor the robot.
 
@@ -136,6 +138,12 @@ justify it — it would buy a lock and nothing else.
   English.
 - `syncai_common` is another repo that vcstool pulls into the container workspace (it is not in
   this repo); change message definitions in SyncAI-Robot-Interface.
-- Known open questions, inherited from the C++ version: `RUNNING` / `ERROR` are never derived,
-  and `low_level_mode` carries no freshness information. The
+- **The state machine is a contract with syncai_backend** (2026-11): `begin_task` decides whether
+  a task run starts, `end_task(FAILED)` latches `ERROR` for every task until an operator's
+  `set_robot_state`, and the rollup's order (`ERROR` > `UNINITIALIZED` > `RUNNING` > …) is what
+  lets a consumer read "confirmed" off `state`. Keep `begin_task` idempotent per task id and
+  `end_task` a no-op for an unknown one — the backend's retries rely on both. README, "The state
+  machine".
+- Known open questions, inherited from the C++ version: `low_level_mode` carries no freshness
+  information, and `ERROR` has one cause (a failed task) until syncai_driver_manager reports faults. The
   README's "Known limits" section records why each one is still open.

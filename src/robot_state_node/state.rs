@@ -1,7 +1,7 @@
 //! The worker payload and the build-and-publish tick.
 //!
-//! Everything here runs on the node's single [`Worker`], so the five sample caches, the TF buffer
-//! and the health latch need no locking at all — the worker is rclrs's equivalent of an rclcpp
+//! Everything here runs on the node's single [`Worker`], so the five sample caches, the TF buffer,
+//! the health latches and the state machine need no locking at all — the worker is rclrs's equivalent of an rclcpp
 //! `MutuallyExclusive` callback group and guarantees its callbacks never overlap. That replaces
 //! the C++ version's `mutex_`; see the threading note in `mod.rs` for why one worker is enough
 //! here when the C++ needed two callback groups.
@@ -10,9 +10,18 @@ use rclrs::*;
 use ros_env::syncai_common::msg::{
     MotorStates, RobotLowLevelMode, RobotPose, RobotState, RobotStatus,
 };
+use ros_env::syncai_common::srv::{
+    BeginTask_Request, BeginTask_Response, EndTask_Request, EndTask_Response,
+    SetRobotState_Request, SetRobotState_Response,
+};
 use std::time::Duration;
 
-use super::health::{self, ChargeReading, ChargingLatch, LatchChange, LowBatteryLatch, Status};
+use super::health::{
+    self, ChargeReading, ChargingLatch, LatchChange, LowBatteryLatch, Rollup, Status,
+};
+use super::lifecycle::{
+    BeginRefusal, Begun, Ended, Lifecycle, Localization, Outcome, Released, Target,
+};
 use super::mode_poll::ModePoll;
 use super::parameters::Config;
 use super::tf::{InvalidTransform, ReportedPose, TfBuffer, Transform};
@@ -22,12 +31,14 @@ use super::wifi::{self, WifiInfo};
 const TF_LOG_THROTTLE: Duration = Duration::from_secs(2);
 const SAMPLE_LOG_THROTTLE: Duration = Duration::from_secs(5);
 
-/// Everything the node holds: the latest sample of each input, the TF tree, one latch, and the
-/// handles needed to publish.
+/// Everything the node holds: the latest sample of each input, the TF tree, the two battery
+/// latches, the state machine, and the handles needed to publish.
 ///
-/// The node "holds no state beyond the latest sample" apart from [`LowBatteryLatch`], and keeping
-/// that true is why `low_level_mode` is carried through untouched — two integers and a bool, no
-/// verdict, no freshness field.
+/// Until 2026-11 the node held no state beyond the latest sample and one latch, and only ever
+/// reported. It now also owns [`Lifecycle`] — the operator's confirmation of the position, the
+/// running task, a latched failure — and answers whether a task may start. That is the one place
+/// it decides anything; `low_level_mode` is still carried through untouched, two integers and a
+/// bool, no verdict, no freshness field.
 pub struct RobotStateData {
     config: Config,
     publisher: Publisher<RobotState>,
@@ -37,6 +48,10 @@ pub struct RobotStateData {
 
     tf: TfBuffer,
     latch: LowBatteryLatch,
+    /// The robot's state machine. Advanced by `localization_status` and by the three services;
+    /// read by the rollup in [`Self::build_state`]. `lifecycle.rs` has what it is and why it
+    /// lives in this node.
+    lifecycle: Lifecycle,
 
     /// Forward speed from `odom`. The whole Odometry message is not kept: only `linear.x` is ever
     /// read, so there is nothing else to hold alive.
@@ -82,6 +97,7 @@ impl RobotStateData {
             mode_poll,
             tf: TfBuffer::default(),
             latch: LowBatteryLatch::default(),
+            lifecycle: Lifecycle::default(),
             odom_velocity: None,
             battery_percentage: None,
             charging: ChargingLatch::default(),
@@ -194,15 +210,341 @@ impl RobotStateData {
         );
     }
 
+    // --- the state machine -------------------------------------------------------------------
+
+    /// The localizer's latched facts: which map, whether its last guess converged, and the epoch
+    /// that names its estimate.
+    ///
+    /// Nothing is decided here beyond storing it — a confirmation is withdrawn by comparison
+    /// with the epoch it was given at, inside [`Lifecycle`]. What this adds is the log: the line
+    /// that says WHY a confirmed robot is UNINITIALIZED again is the one an operator's "it was
+    /// fine a minute ago" gets answered from.
+    ///
+    /// An identical sample is a replay (the topic is latched and re-delivered to a late joiner,
+    /// and on every rematch after the localizer restarts) and is not worth a line.
+    pub fn accept_localization_status(&mut self, sample: Localization) {
+        if self.lifecycle.localization() == Some(&sample) {
+            return;
+        }
+        let previous_epoch = self.lifecycle.localization().map(|l| l.epoch);
+        let withdrawn = self.lifecycle.accept_localization(sample.clone());
+        if withdrawn {
+            log_warn!(
+                &self.logger,
+                "[RobotStateNode] position confirmation withdrawn: the localizer's estimate is \
+                 no longer the one that was confirmed (pose_epoch {} -> {}, map '{}', converged \
+                 {}); state -> UNINITIALIZED until an operator confirms again",
+                previous_epoch.map_or_else(|| "none".to_owned(), |e| e.to_string()),
+                sample.epoch,
+                sample.map,
+                sample.converged,
+            );
+            // The console must not show a confirmed robot for the rest of the publish period.
+            self.publish();
+        } else {
+            log_info!(
+                &self.logger,
+                "[RobotStateNode] localization: map '{}', converged {}, pose_epoch {} \
+                 (position confirmed: {})",
+                sample.map,
+                sample.converged,
+                sample.epoch,
+                self.lifecycle.is_confirmed(),
+            );
+        }
+    }
+
+    /// `set_robot_state`: the operator's switch. See [`Lifecycle::set_state`] for the rules.
+    pub fn set_robot_state(&mut self, request: SetRobotState_Request) -> SetRobotState_Response {
+        let target = match request.state {
+            RobotStatus::IDLE => Target::Idle,
+            RobotStatus::UNINITIALIZED => Target::Uninitialized,
+            other => {
+                log_warn!(
+                    &self.logger,
+                    "[RobotStateNode] set_robot_state refused: state {other} cannot be asked \
+                     for (only IDLE = {} and UNINITIALIZED = {}; the rest are derived)",
+                    RobotStatus::IDLE,
+                    RobotStatus::UNINITIALIZED,
+                );
+                return SetRobotState_Response {
+                    success: false,
+                    code: SetRobotState_Response::INVALID_TARGET,
+                    message: "Only a confirmed or an unconfirmed position can be asked for."
+                        .to_owned(),
+                    state: self.status_code(),
+                };
+            }
+        };
+
+        match self.lifecycle.set_state(target) {
+            Ok(released) => {
+                self.log_switch(target, &released);
+                // Now, not on the next tick: the caller's very next read of robot_state should
+                // show what it just did.
+                self.publish();
+                SetRobotState_Response {
+                    success: true,
+                    code: SetRobotState_Response::NONE,
+                    message: switch_sentence(target, &released),
+                    state: self.status_code(),
+                }
+            }
+            Err(why) => {
+                log_warn!(
+                    &self.logger,
+                    "[RobotStateNode] set_robot_state(IDLE) refused: {why:?} (localization: \
+                     {:?}); the state stays {}",
+                    self.lifecycle.localization(),
+                    status_name(self.status()),
+                );
+                SetRobotState_Response {
+                    success: false,
+                    code: SetRobotState_Response::NOT_CONVERGED,
+                    message: why.sentence().to_owned(),
+                    state: self.status_code(),
+                }
+            }
+        }
+    }
+
+    fn log_switch(&self, target: Target, released: &Released) {
+        let epoch = self.lifecycle.localization().map(|l| l.epoch);
+        match target {
+            Target::Idle => log_info!(
+                &self.logger,
+                "[RobotStateNode] position confirmed by the operator at pose_epoch {:?}; state \
+                 -> {}",
+                epoch,
+                status_name(self.status()),
+            ),
+            Target::Uninitialized => log_info!(
+                &self.logger,
+                "[RobotStateNode] position confirmation withdrawn by the operator; state -> {}",
+                status_name(self.status()),
+            ),
+        }
+        if let Some(fault) = &released.fault {
+            log_info!(
+                &self.logger,
+                "[RobotStateNode] error released by the operator (task '{}' had failed: {})",
+                fault.task_id,
+                if fault.reason.is_empty() {
+                    "no reason given"
+                } else {
+                    &fault.reason
+                },
+            );
+        }
+        if let Some(task) = &released.task {
+            // Either a run whose end_task never came, or a switch under a live task that the
+            // backend should have refused. From here the two look the same; say so.
+            log_warn!(
+                &self.logger,
+                "[RobotStateNode] task '{task}' was still counted as running and has been \
+                 dropped by the operator's switch; a later end_task for it will be ignored",
+            );
+        }
+    }
+
+    /// `begin_task`: may this task start? See [`Lifecycle::begin_task`].
+    pub fn begin_task(&mut self, request: BeginTask_Request) -> BeginTask_Response {
+        let pose_available = self.pose_available();
+        let initialized = Rollup::initialized(self.lifecycle.is_confirmed(), pose_available);
+        match self
+            .lifecycle
+            .begin_task(&request.task_id, request.needs_localization, initialized)
+        {
+            Ok(Begun::Started) => {
+                log_info!(
+                    &self.logger,
+                    "[RobotStateNode] task '{}' accepted (needs localization: {}); state -> {}",
+                    request.task_id,
+                    request.needs_localization,
+                    status_name(self.status()),
+                );
+                self.publish();
+                BeginTask_Response {
+                    accepted: true,
+                    code: BeginTask_Response::NONE,
+                    message: "The task was accepted.".to_owned(),
+                }
+            }
+            Ok(Begun::AlreadyRunning) => {
+                log_info!(
+                    &self.logger,
+                    "[RobotStateNode] task '{}' asked to begin again and is already running; \
+                     accepted again (a retried call)",
+                    request.task_id,
+                );
+                BeginTask_Response {
+                    accepted: true,
+                    code: BeginTask_Response::NONE,
+                    message: "The task is already running.".to_owned(),
+                }
+            }
+            Err(refusal) => {
+                let (code, message) = match &refusal {
+                    BeginRefusal::ErrorLatched(_) => (
+                        BeginTask_Response::ERROR_LATCHED,
+                        "The robot refused the task: an earlier task failed and the error has \
+                         not been released.",
+                    ),
+                    BeginRefusal::NotInitialized => (
+                        BeginTask_Response::NOT_INITIALIZED,
+                        "The robot refused the task: its position on the map has not been \
+                         confirmed by an operator.",
+                    ),
+                    BeginRefusal::Busy { .. } => (
+                        BeginTask_Response::BUSY,
+                        "The robot refused the task: another task is running.",
+                    ),
+                };
+                log_warn!(
+                    &self.logger,
+                    "[RobotStateNode] task '{}' refused: {refusal:?} (needs localization: {}, \
+                     position confirmed: {}, pose available: {pose_available}, localization: \
+                     {:?}); the state stays {}",
+                    request.task_id,
+                    request.needs_localization,
+                    self.lifecycle.is_confirmed(),
+                    self.lifecycle.localization(),
+                    status_name(self.status()),
+                );
+                BeginTask_Response {
+                    accepted: false,
+                    code,
+                    message: message.to_owned(),
+                }
+            }
+        }
+    }
+
+    /// `end_task`: how an accepted task ended. See [`Lifecycle::end_task`].
+    pub fn end_task(&mut self, request: EndTask_Request) -> EndTask_Response {
+        let outcome = match request.outcome {
+            EndTask_Request::COMPLETED => Outcome::Completed,
+            EndTask_Request::FAILED => Outcome::Failed,
+            EndTask_Request::CANCELED => Outcome::Canceled,
+            other => {
+                // 0 is deliberately no outcome (EndTask.srv): a request nobody filled in must
+                // not close a task as completed.
+                log_warn!(
+                    &self.logger,
+                    "[RobotStateNode] end_task for '{}' refused: outcome {other} is not one of \
+                     COMPLETED / FAILED / CANCELED; nothing changed",
+                    request.task_id,
+                );
+                return EndTask_Response {
+                    success: false,
+                    message: "The report names no outcome.".to_owned(),
+                };
+            }
+        };
+
+        match self
+            .lifecycle
+            .end_task(&request.task_id, outcome, &request.reason)
+        {
+            Ended::Closed => {
+                log_info!(
+                    &self.logger,
+                    "[RobotStateNode] task '{}' ended {outcome:?}; state -> {}",
+                    request.task_id,
+                    status_name(self.status()),
+                );
+                self.publish();
+                EndTask_Response {
+                    success: true,
+                    message: "The task was closed.".to_owned(),
+                }
+            }
+            Ended::Latched => {
+                log_error!(
+                    &self.logger,
+                    "[RobotStateNode] task '{}' FAILED ({}); state -> ERROR, latched: every \
+                     task is refused until an operator releases it with set_robot_state",
+                    request.task_id,
+                    if request.reason.trim().is_empty() {
+                        "no reason given"
+                    } else {
+                        request.reason.trim()
+                    },
+                );
+                self.publish();
+                EndTask_Response {
+                    success: true,
+                    message: "The task was closed and the error is held.".to_owned(),
+                }
+            }
+            Ended::NotRunning => {
+                log_warn!(
+                    &self.logger,
+                    "[RobotStateNode] end_task({outcome:?}) for '{}' ignored: the robot is \
+                     running {}. Nothing changed, and no error is latched from it",
+                    request.task_id,
+                    self.lifecycle
+                        .task()
+                        .map_or_else(|| "no task".to_owned(), |t| format!("task '{t}'")),
+                );
+                EndTask_Response {
+                    success: false,
+                    message: "The robot is not running that task.".to_owned(),
+                }
+            }
+        }
+    }
+
+    /// There is a `map -> base_link` to report: the rollup's second condition for "initialized"
+    /// ([`Rollup::initialized`]), asked here for the services, which run between ticks.
+    fn pose_available(&self) -> bool {
+        self.tf
+            .robot_pose(
+                &self.config.global_frame,
+                &self.config.base_frame,
+                &self.config.body_frame,
+                &self.config.lidar_frame,
+            )
+            .is_ok()
+    }
+
+    fn rollup(&self, pose_available: bool) -> Status {
+        health::derive_status(Rollup {
+            error: self.lifecycle.fault().is_some(),
+            initialized: Rollup::initialized(self.lifecycle.is_confirmed(), pose_available),
+            running: self.lifecycle.task().is_some(),
+            charging: self.charging.is_engaged(),
+            low_battery: self.latch.is_engaged(),
+        })
+    }
+
+    fn status(&self) -> Status {
+        self.rollup(self.pose_available())
+    }
+
+    fn status_code(&self) -> u8 {
+        status_code(self.status())
+    }
+
     // --- the tick ------------------------------------------------------------------------------
 
     /// Latches first, then the build that reads them, so both describe the same tick. This is the
-    /// only place the latch advances.
+    /// only place the battery latch advances.
     ///
     /// Keeping the two apart gives any future dwell counter or rate-limited transition exactly one
-    /// place it can live, ticking once per publish rather than once per `build_state` call.
+    /// place it can live, ticking once per publish period rather than once per `build_state` call
+    /// — which is also why the state machine's own transitions call [`Self::publish`] and not
+    /// this.
     pub fn on_timer(&mut self) {
         self.update_health_latch();
+        self.publish();
+    }
+
+    /// Build and send one `robot_state`. Called by the tick, and at once after every transition
+    /// of the state machine: at the shipped 1 Hz a caller that confirmed the position, or a
+    /// console that has just been told a task was refused, would otherwise read the old state
+    /// for up to a second.
+    fn publish(&self) {
         let msg = self.build_state();
         if let Err(e) = self.publisher.publish(msg) {
             log_error!(
@@ -313,21 +655,13 @@ impl RobotStateData {
             }
         }
 
-        // State derivation, most-severe-first (health::derive_status has the precedence and
-        // why). Consumers that need the precise answer read localization_valid; state is the
-        // coarse rollup of it.
-        //
-        // TODO: RUNNING and ERROR are not derived yet.
-        msg.state = match health::derive_status(
-            msg.localization_valid,
-            self.charging.is_engaged(),
-            self.latch.is_engaged(),
-        ) {
-            Status::Uninitialized => RobotStatus::UNINITIALIZED,
-            Status::Charging => RobotStatus::CHARGING,
-            Status::Warning => RobotStatus::WARNING,
-            Status::Idle => RobotStatus::IDLE,
-        };
+        // The rollup of the state machine and the battery, most-severe-first
+        // (health::derive_status has the precedence and why). `localization_valid` above is one
+        // of its inputs and no longer its meaning: UNINITIALIZED is "no operator has confirmed
+        // the position", which outlasts the TF by however long it takes someone to look.
+        msg.state = status_code(self.rollup(msg.localization_valid));
+        msg.localization_converged = self.lifecycle.is_converged();
+        msg.state_message = self.lifecycle.message(msg.localization_valid);
 
         // Forward speed only (linear.x), not the speed magnitude: negative when reversing, and
         // lateral motion is ignored.
@@ -366,4 +700,40 @@ impl RobotStateData {
     fn timestamp_seconds(&self) -> u64 {
         u64::try_from(self.clock.now().nsec.div_euclid(1_000_000_000)).unwrap_or(0)
     }
+}
+
+fn status_code(status: Status) -> u8 {
+    match status {
+        Status::Error => RobotStatus::ERROR,
+        Status::Uninitialized => RobotStatus::UNINITIALIZED,
+        Status::Running => RobotStatus::RUNNING,
+        Status::Charging => RobotStatus::CHARGING,
+        Status::Warning => RobotStatus::WARNING,
+        Status::Idle => RobotStatus::IDLE,
+    }
+}
+
+/// The constant's name, for the log: a line that says "state -> 4" sends its reader to the .msg.
+fn status_name(status: Status) -> &'static str {
+    match status {
+        Status::Error => "ERROR",
+        Status::Uninitialized => "UNINITIALIZED",
+        Status::Running => "RUNNING",
+        Status::Charging => "CHARGING",
+        Status::Warning => "WARNING",
+        Status::Idle => "IDLE",
+    }
+}
+
+/// What the operator is told their switch did. Shown verbatim by the console.
+fn switch_sentence(target: Target, released: &Released) -> String {
+    let mut sentence = match target {
+        Target::Idle => "The robot's position is confirmed.",
+        Target::Uninitialized => "The robot's position is no longer confirmed.",
+    }
+    .to_owned();
+    if released.fault.is_some() {
+        sentence.push_str(" The error was released.");
+    }
+    sentence
 }

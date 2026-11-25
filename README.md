@@ -6,7 +6,10 @@ The ROS 2 package `syncai_robot_state`, written with [`ros2_rust`](https://githu
 It is a Rust port of the C++ (rclcpp) `syncai_robot_state` in SyncAI-Robot-Workspace, and **its
 external interface is deliberately identical**: the node name `syncai_robot_state`, the executable
 `robot_state_node`, parameter names, topics, message types, QoS and the service it calls are all
-the same, so it is a drop-in replacement. There are two deliberate exceptions: the
+the same, so it is a drop-in replacement — **of the reporting half**. Since 2026-11 this node
+also owns the robot's state machine and serves `set_robot_state` / `begin_task` / `end_task`,
+which the C++ version never had ([The state machine](#the-state-machine)). In the reporting half
+there are two deliberate exceptions: the
 `safety_locked` subscription, which fills `low_level_mode.safety_state` — a field the backend has
 to rebuild against SyncAI-Robot-Interface to read, though nothing it reads today changed — and
 `localization_status.position.z`, which is base_link's real height read through the lidar rather
@@ -33,17 +36,24 @@ One node that aggregates the robot's scattered status sources into a single
     motor_states_low_rate (20 Hz) ───────┤                                                   │
     mode          (Int32MultiArray) ─────┤                                                   │
     safety_locked (Bool, latched) ───────┤                                                   ▼
-    get_mode      (service, polled) ─────┘                                    GET /api/v1/robot/state
+    get_mode      (service, polled) ─────┤                                    GET /api/v1/robot/state
+    localization_status (latched) ───────┘   (syncai_localizer: map, converged, pose_epoch)
+
+    syncai_backend ──begin_task / end_task──►  syncai_robot_state   (every task run, a schedule's too)
+    syncai_backend ──set_robot_state────────►  syncai_robot_state   (the operator's Confirm control)
 ```
 
-One publisher, one timer, and syncai_backend as its only consumer — which has been out of tree
-since 2026-09, so this topic is a cross-repository contract: widening a field is free, changing or
-removing one is not.
+One publisher, one timer, three services, and syncai_backend as the only consumer and caller —
+which has been out of tree since 2026-09, so the topic and the services are a cross-repository
+contract: widening a field is free, changing or removing one is not.
 
-It derives very little: a yaw extraction, the height through the lidar, a unit conversion, the
-localization-validity flag, one latched threshold (low battery → `WARNING`) and the battery's charge status (→ `CHARGING`). It holds no state beyond the latest sample of each
-input and that one latch. **It only ever reports** — no threshold here commands the robot to do
-anything.
+Most of the message is a straight copy: a yaw extraction, the height through the lidar, a unit
+conversion, the TF-presence flag, one latched threshold (low battery → `WARNING`) and the
+battery's charge status (→ `CHARGING`). **`state` is the exception since 2026-11**: it rolls up a
+state machine this node owns — whether an operator has confirmed the position, whether a task is
+running, whether a failure is latched — and through `begin_task` that is a decision the backend
+obeys. It is the one thing here that is not a report. Still no threshold commands the robot to do
+anything; refusing a task is the whole of it.
 
 ### Interfaces
 
@@ -60,11 +70,15 @@ name (`<robot_id>/base_link`) instead.
 | Subscribe | `motor_states_low_rate` | `syncai_common/MotorStates` | SensorData. driver_manager's 20 Hz copy of `motor_states` (~200 Hz), since 2026-11: only the latest sample is used |
 | Subscribe | `mode` | `std_msgs/Int32MultiArray` | RELIABLE, VOLATILE, KeepLast(10) |
 | Subscribe | `safety_locked` | `std_msgs/Bool` | RELIABLE, TRANSIENT_LOCAL, KeepLast(1) |
+| Subscribe | `localization_status` | `syncai_common/LocalizationStatus` | RELIABLE, TRANSIENT_LOCAL, KeepLast(1). The localizer's facts, published on a change only (2026-11) |
 | Subscribe | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | KeepLast(100), reliable; `/tf_static` also TRANSIENT_LOCAL |
+| Service | `set_robot_state` | `syncai_common/SetRobotState` | The operator's switch: confirm / withdraw the position, release an error |
+| Service | `begin_task` | `syncai_common/BeginTask` | May this task start? An acceptance is the transition to `RUNNING` |
+| Service | `end_task` | `syncai_common/EndTask` | How an accepted task ended; `FAILED` latches `ERROR` |
 | Service client | `get_mode` | `syncai_common/GetMode` | polled at `mode_poll_rate`, at most one request in flight |
 
-`mode` and `safety_locked` are **the only RELIABLE endpoints in this node**, mirroring their
-publishers in `syncai_driver_manager`: both topics are edge-triggered rather than periodic, so a
+`mode`, `safety_locked` and `localization_status` are **the only RELIABLE subscriptions in this
+node**, mirroring their publishers (`syncai_driver_manager`, and `syncai_localizer` for the last): both topics are edge-triggered rather than periodic, so a
 dropped sample is not made good by the next one. The flip side is that a publisher relaxed to
 best-effort would stop matching these subscriptions **silently** — check with
 `ros2 topic info /<robot_id>/mode --verbose` (and the same for `safety_locked`).
@@ -77,6 +91,10 @@ sample writes only `policy_state` / `motion_state`, so the two topics cannot ove
 Durability has the same silent failure as reliability: a transient-local reader matches only a
 transient-local writer, so a driver relaxed to VOLATILE would leave `safety_state` at `false` with
 no error anywhere. Change the two sides together.
+
+`localization_status` is latched for the same reason and has the same trap: it is published on a
+change only, this node may start after the last one, and against a localizer relaxed to VOLATILE
+the robot would read "not converged" for good — the position could never be confirmed.
 
 The same trap points the other way at `robot_state`: a best-effort publisher cannot satisfy a
 RELIABLE subscriber, so subscribing with the default rclcpp/rclpy QoS receives nothing at all.
@@ -101,28 +119,105 @@ All are **load-time only** and declared read-only, so `ros2 param set` is reject
 silently ignored. A `low_battery_clear_percentage` at or below the warn value is rejected at
 startup and both fall back to 20/25.
 
-### The `state` derivation
+### The state machine
 
-Four of the six `RobotStatus` values are emitted, most-severe-first (`health::derive_status`):
+Until 2026-11 `state` was derived from the TF tree and the battery, and `UNINITIALIZED` meant only
+"`map → base_link` has never been seen". The localizer broadcasts that transform from Point-LIO's
+first odometry on — the identity before anything has converged, the previous map's correction
+after a map switch — so the state read `IDLE` a few seconds after boot and stayed `IDLE` through a
+switch, and a task (a scheduled one above all, which nobody is watching) drove off from a pose no
+one had looked at. `RUNNING` and `ERROR` were declared and never emitted.
+
+Now this node owns the machine (`lifecycle.rs`) and is the one judge of whether a task may start:
+
+```
+start ──► UNINITIALIZED ──set_robot_state(IDLE), needs converged──► IDLE
+IDLE ──begin_task accepted──► RUNNING ──end_task(COMPLETED / CANCELED)──► IDLE
+RUNNING ──end_task(FAILED)──► ERROR ──set_robot_state──► IDLE or UNINITIALIZED
+IDLE ──another pose_epoch / set_robot_state(UNINITIALIZED)──► UNINITIALIZED
+```
+
+All six `RobotStatus` values are emitted, most-severe-first (`health::derive_status`):
 
 | `state` | Condition |
 |---|---|
-| `UNINITIALIZED` | `map → base_link` TF unavailable |
+| `ERROR` | a task ended `FAILED` (`end_task`). **Latched**: only `set_robot_state` releases it. Refuses **every** task |
+| `UNINITIALIZED` | no operator has confirmed the localizer's current estimate, or there is no `map → base_link` to report. Refuses a task with a MOVE / PATROL / CHARGE step |
+| `RUNNING` | a task `begin_task` accepted and `end_task` has not closed. One at a time |
 | `CHARGING` | latched: engaged by a `battery_state` reading `POWER_SUPPLY_STATUS_CHARGING`, released only by one reading `DISCHARGING` |
 | `WARNING` | battery below the low-battery threshold (latched, with hysteresis) |
-| `IDLE` | otherwise |
+| `IDLE` | otherwise: confirmed, nothing running |
 
-`UNINITIALIZED` outranks the rest on purpose: "we don't know where the robot is" is the more
-fundamental fact, and hiding it would leave `localization_status` reading as a pose when it is a
-zero placeholder. `CHARGING` outranks `WARNING`: a low pack on its charger is what is being
-fixed. `CHARGING` is syncai_driver_manager's: it derives `power_supply_status` from the sign of
-the pack's **net** current with a 0.1 A deadband, so it means the charger delivers more than the
-robot draws. A nearly full pack's current tapers into that deadband (`NOT_CHARGING`) with the
-robot still on its charger, so the state is latched (`health::ChargingLatch`): it holds through
-`NOT_CHARGING` and drops on the first `DISCHARGING`, which a robot taken off the charger reads
-as soon as it draws its own load. Not a percentage rule: this node does not know the robot is on
-a charger, and a full robot idling elsewhere must not read `CHARGING`. No freshness rule, as for
-every other input: a driver that stops publishing leaves the last status in place. `RUNNING` and `ERROR` are not derived yet.
+`state_message` says why in one sentence written for an operator (what the robot is waiting for,
+that a task runs, what failed), and `localization_converged` says the position *can* be confirmed.
+
+**The order is part of the contract.** `UNINITIALIZED` sits above `RUNNING` so that "neither
+`ERROR` nor `UNINITIALIZED`" reads as "the position is confirmed" with no field for it; the price
+is that a posture task run on an unconfirmed robot reads `UNINITIALIZED` while it runs. `ERROR`
+sits above everything because it is the one state that stops every task and that only a person
+ends: an operator shown `UNINITIALIZED` would confirm the position and still have a robot that
+refuses.
+
+**A confirmation is a remembered `pose_epoch`, not a flag.** `set_robot_state(IDLE)` stores the
+epoch `localization_status` carried at that moment, and the robot is confirmed for exactly as long
+as the localizer still reports that value. A map switch, a new initial pose, an auto-localize and
+a restarted localizer all change it, so each withdraws the confirmation without an event this node
+could miss or see out of order. A guess that is queued and converges between two samples —
+`converged` never reads false — is withdrawn the same way, which is what a flag cleared on
+`converged: false` gets wrong. A converged boot guess confirms nothing: it only makes the position
+confirmable.
+
+**`begin_task`** is asked by the backend as the first activity of every task run, a run a schedule
+started by itself included. Refusals, in the order they are judged:
+
+| Code | When | Applies to |
+|---|---|---|
+| `ERROR_LATCHED` | a failure is latched | every task |
+| `NOT_INITIALIZED` | the position is not confirmed | a task with `needs_localization` |
+| `BUSY` | another `task_id` is running | every task |
+
+A refusal changes nothing — in particular it never latches `ERROR`. An acceptance *is* the
+transition, so two runs cannot both be let through and there is no `robot_state` sample to read a
+second too late. It is idempotent per `task_id` (judged before anything else): a caller that lost
+the first answer and retries would otherwise read `BUSY` against itself and, told no, never send
+the `end_task` that lets the robot go.
+
+**`end_task`** is matched by `task_id` and a no-op otherwise, which makes a repeated report
+harmless and keeps a run this node forgot (it restarted mid-task) from latching an `ERROR` its log
+cannot explain. `COMPLETED` and `CANCELED` change nothing but the task: a robot that stood up
+unconfirmed is unconfirmed afterwards.
+
+**`set_robot_state`** is the only way into "confirmed" and the only way out of `ERROR`. `IDLE` is
+refused `NOT_CONVERGED` without a converged estimate (no localizer heard from — every moment of
+the mapping session — no map, or a guess that has not landed), and a refusal releases nothing.
+Either target also drops a task still counted as running. That is the recovery for a workflow
+terminated from outside, whose `end_task` never comes, and it is why this service does **not**
+refuse while a task runs: the backend does, from its own job list.
+
+**In memory only.** A restart of this node is `UNINITIALIZED` with no error and no task. That is
+the wanted behaviour for the restarts that happen — a boot, a mode switch and `restart_mode` all
+bring the localizer up afresh beside it — and the safe one for a crash: it can forget a
+confirmation, never invent one. The mapping session runs no localizer, so the robot is
+`UNINITIALIZED` for the whole run and still takes a task that needs no position.
+
+**ERROR has more than one cause by design.** Today the one cause is a failed task. A fault
+reported by `syncai_driver_manager` is to be the second; it has no such signal yet. When it does,
+it is a `FaultSource` variant, a subscription and one call — the latch, the refusals and the
+release do not change.
+
+Every transition and every refusal is logged with the values that decided it (the task id,
+`pose_epoch`, the map, `converged`, whether a pose is available), and each transition publishes a
+`robot_state` at once instead of waiting for the 1 Hz tick.
+
+The battery states are unchanged. `CHARGING` outranks `WARNING`: a low pack on its charger is what
+is being fixed. `CHARGING` is syncai_driver_manager's: it derives `power_supply_status` from the
+sign of the pack's **net** current with a 0.1 A deadband, so it means the charger delivers more
+than the robot draws. A nearly full pack's current tapers into that deadband (`NOT_CHARGING`) with
+the robot still on its charger, so the state is latched (`health::ChargingLatch`): it holds
+through `NOT_CHARGING` and drops on the first `DISCHARGING`, which a robot taken off the charger
+reads as soon as it draws its own load. Not a percentage rule: this node does not know the robot
+is on a charger, and a full robot idling elsewhere must not read `CHARGING`. No freshness rule, as
+for every other input: a driver that stops publishing leaves the last status in place.
 
 ## Why Docker
 
@@ -185,8 +280,9 @@ ros2 run syncai_robot_state robot_state_node --ros-args -r __ns:=/default_robot 
     --params-file params/robot_state_params.yaml
 ```
 
-Expect `localization_valid: false` and `state: 0` (`UNINITIALIZED`) until something publishes
-`map -> base_link`, with every other field populated alongside. A fake `map -> base_link` alone
+Expect `localization_valid: false` until something publishes `map -> base_link`, and `state: 0`
+(`UNINITIALIZED`) for as long as nothing has confirmed the position — which a fake TF never does —
+with every other field populated alongside. A fake `map -> base_link` alone
 reports its own z and a throttled "Height through the lidar unavailable" warning, since there is no
 `pointlio_body` / `lidar_top_imu` behind it. To exercise the rest — note the
 `<robot_id>` namespace, and use a separate `ROS_DOMAIN_ID` so this never reaches the real robot:
@@ -199,8 +295,28 @@ ros2 topic pub -r 10 /tf tf2_msgs/msg/TFMessage \
   "{transforms: [{header: {frame_id: map}, child_frame_id: base_link, transform: \
     {translation: {x: 1.0, y: 2.0, z: 0.0}, rotation: {z: 0.7071068, w: 0.7071068}}}]}"
 
-# 19% -> state WARNING (3); 22% is inside the hysteresis band and stays WARNING;
-# 26% clears it to IDLE (1); 0.0 simulates a corrupt BMS token and must change nothing
+# Stand in for the localizer: a converged estimate, latched, as it publishes it
+ros2 topic pub --once --qos-reliability reliable --qos-durability transient_local \
+  /default_robot/localization_status syncai_common/msg/LocalizationStatus \
+  "{map: office, converged: true, pose_epoch: 7}"
+
+# Still UNINITIALIZED (0): a converged estimate confirms nothing. Confirm it -> IDLE (1)
+ros2 service call /default_robot/set_robot_state syncai_common/srv/SetRobotState "{state: 1}"
+
+# RUNNING (2), then ERROR (4) and every begin_task refused, then released
+ros2 service call /default_robot/begin_task syncai_common/srv/BeginTask \
+  "{task_id: t1, needs_localization: true}"
+ros2 service call /default_robot/end_task syncai_common/srv/EndTask \
+  "{task_id: t1, outcome: 2, reason: 'the goal is occupied'}"
+ros2 service call /default_robot/set_robot_state syncai_common/srv/SetRobotState "{state: 1}"
+
+# Another pose_epoch (a new guess, a map switch) -> UNINITIALIZED again
+ros2 topic pub --once --qos-reliability reliable --qos-durability transient_local \
+  /default_robot/localization_status syncai_common/msg/LocalizationStatus \
+  "{map: office, converged: true, pose_epoch: 8}"
+
+# With the position confirmed: 19% -> state WARNING (3); 22% is inside the hysteresis band and
+# stays WARNING; 26% clears it to IDLE (1); 0.0 simulates a corrupt BMS token and must change nothing
 ros2 topic pub -r 5 /default_robot/battery_state sensor_msgs/msg/BatteryState \
   "{percentage: 0.19, present: true}"
 
@@ -224,11 +340,13 @@ best-effort.
 │   └── robot_state_node/
 │       ├── mod.rs          # wiring: parameters → publisher → one worker → subscriptions + timers
 │       ├── parameters.rs   # the eleven load-time parameters, and Hz -> period
-│       ├── state.rs        # the worker payload, sample intake, and the build-and-publish tick
-│       ├── subscribers.rs  # the eight subscriptions and their QoS
+│       ├── state.rs        # the worker payload, sample intake, the service handlers, and the build-and-publish tick
+│       ├── subscribers.rs  # the nine subscriptions and their QoS
+│       ├── services.rs     # set_robot_state / begin_task / end_task, on the same worker
+│       ├── lifecycle.rs    # the robot's state machine                       (pure, unit-tested)
 │       ├── mode_poll.rs    # the get_mode client poll and its in-flight guard
 │       ├── tf.rs           # the TF buffer and lookup that replace tf2_ros  (pure, unit-tested)
-│       ├── health.rs       # the low-battery hysteresis latch                (pure, unit-tested)
+│       ├── health.rs       # the battery latches and the `state` rollup      (pure, unit-tested)
 │       └── wifi.rs         # WifiStatus -> the wifi_info JSON string         (pure, unit-tested)
 │
 │   # Only for developing this repo on its own; SyncAI-Robot-Workspace does not use these
@@ -236,7 +354,7 @@ best-effort.
 └── .devcontainer/          # Dockerfile + devcontainer.json
 ```
 
-`tf.rs`, `health.rs` and `wifi.rs` are pure functions over plain Rust types — the ROS messages are
+`tf.rs`, `health.rs`, `lifecycle.rs` and `wifi.rs` are pure functions over plain Rust types — the ROS messages are
 converted at the subscription boundary — so their tests need neither a ROS environment nor the
 robot, the same split `protocol.rs` has in syncai_driver_manager.
 
@@ -288,7 +406,7 @@ robot, the same split `protocol.rs` has in syncai_driver_manager.
 * **Parameters are declared read-only**, so `ros2 param set` is rejected. The C++ reads each
   parameter once and has no `add_on_set_parameters_callback`, so a set there appears to succeed and
   changes nothing. Same effective behaviour, made visible.
-* **One worker instead of two callback groups and a mutex.** The eight subscriptions and both
+* **One worker instead of two callback groups and a mutex.** The nine subscriptions, the three services and both
   timers run on a single rclrs `Worker`, whose callbacks never overlap — which is exactly the
   protection the C++ `mutex_` provides, with no lock to take. The C++ needs a second
   `MutuallyExclusive` group because `tf2_ros::Buffer::transform()` blocks for the whole
@@ -360,6 +478,19 @@ vcs import --force < src/syncai_robot_state/interface.repos   # discard local ch
   `syncai_driver_manager` dies the latch freezes on its last verdict: died at 15% → `WARNING`
   forever (errs safe), died at 80% → `IDLE` forever (misleading).
 * **`WARNING` carries no reason.** A second `WARNING` condition will need a reason field or bitmask.
+  (`ERROR` and `UNINITIALIZED` do have one since 2026-11: `state_message`.)
+* **`localization_status` has no liveness either.** It is latched and published on a change only,
+  so a localizer that died after reporting `converged: true` leaves the position confirmable, and
+  a confirmed robot confirmed. Going lost does not withdraw a confirmation: the localizer's health
+  state is not on the topic, on purpose (its thresholds are not replay-verified).
+* **The gate is only as wide as its callers.** `begin_task` stops a task the backend runs. A goal
+  sent straight to `navigate_to_goal` (rviz, the `ros2` CLI) and the console's teleop are accepted
+  in any state — nothing in the navigation stack asks this node.
+* **A task counted as running is never timed out.** If its `end_task` never comes the robot
+  answers `BUSY` until an operator's `set_robot_state`; there is no heartbeat from the backend to
+  age it by.
+* **`ERROR` does not survive a restart of this node**, which comes up `UNINITIALIZED` with nothing
+  latched: a task that needs no position is then accepted again.
 * **`low_level_mode` has no freshness information at all.** `0 / 0 / false` before the first sample
   is indistinguishable from a genuine "PPO / Stand, lock released", and a frozen value is equally
   consistent with a dead driver, a controller that stopped sending the MODE_STATE section, and
