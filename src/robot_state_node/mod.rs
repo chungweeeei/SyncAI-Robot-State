@@ -1,6 +1,8 @@
 mod health;
+mod lifecycle;
 mod mode_poll;
 mod parameters;
+mod services;
 mod state;
 mod subscribers;
 mod tf;
@@ -13,26 +15,31 @@ use ros_env::syncai_common::msg::RobotState;
 
 use mode_poll::ModePoll;
 use parameters::Parameters;
+use services::Services;
 use state::RobotStateData;
 use subscribers::Subscriptions;
 
 /// Aggregates the robot's scattered status sources into one `syncai_common/RobotState`, published
-/// on the relative topic `robot_state` (so it lands on `<robot_id>/robot_state`).
+/// on the relative topic `robot_state` (so it lands on `<robot_id>/robot_state`) — and, since
+/// 2026-11, owns the robot's state machine and answers whether a task may start.
 ///
-/// One publisher, one timer, and syncai_backend as its only consumer — which is out of tree since
-/// 2026-09, so this topic is a cross-repository contract: widening a field is free, changing or
-/// removing one is not.
+/// One publisher, one timer, three services, and syncai_backend as the only consumer and caller
+/// — which is out of tree since 2026-09, so the topic and the services are a cross-repository
+/// contract: widening a field is free, changing or removing one is not.
 ///
-/// It derives very little: a yaw extraction, the height through the lidar, a unit conversion, the
-/// localization-validity flag and one latched threshold (low battery -> WARNING). It holds no state beyond the latest sample of
-/// each input and that one latch. **It only ever reports** — no threshold here commands the robot
-/// to do anything.
+/// Most of the message is still a straight copy: a yaw extraction, the height through the lidar,
+/// a unit conversion, the TF-presence flag and two battery latches. The exception is `state`,
+/// which until 2026-11 was derived from those and now rolls up [`lifecycle::Lifecycle`]: the
+/// operator's confirmation of the position, the running task, and a latched failure. Through
+/// `begin_task` that is a decision other software obeys — the first thing this node does that is
+/// not a report. No threshold here commands the robot to do anything, still; refusing a task is
+/// the whole of it.
 ///
 /// # Threading
 ///
-/// Everything runs on ONE rclrs [`Worker`]: the eight subscriptions, the publish timer and the
-/// get_mode poll timer. Callbacks on a worker never overlap, which gives the sample caches, the TF
-/// buffer and the health latch exactly the protection the C++ version's `mutex_` gives them, with
+/// Everything runs on ONE rclrs [`Worker`]: the nine subscriptions, the three services, the
+/// publish timer and the get_mode poll timer. Callbacks on a worker never overlap, which gives the
+/// sample caches, the TF buffer, the health latches and the state machine exactly the protection the C++ version's `mutex_` gives them, with
 /// no lock to take.
 ///
 /// The C++ gives its 10 Hz timer a second, `MutuallyExclusive` callback group, and that is not
@@ -49,6 +56,7 @@ pub struct RobotStateNode {
     // Fields drop in declaration order: the timers stop firing before the subscriptions and the
     // worker that their callbacks run on go away.
     _timers: Timers,
+    _services: Services,
     _subscriptions: Subscriptions,
     _worker: Worker<RobotStateData>,
     // Parameters are undeclared when their handles drop, so they are kept for the node's life
@@ -82,6 +90,7 @@ impl RobotStateNode {
         ));
 
         let subscriptions = Subscriptions::create(&worker)?;
+        let services = Services::create(&worker)?;
         let timers = Timers::create(&worker, publish_period, mode_poll_period)?;
 
         log_info!(
@@ -91,6 +100,7 @@ impl RobotStateNode {
 
         Ok(Self {
             _timers: timers,
+            _services: services,
             _subscriptions: subscriptions,
             _worker: worker,
             _parameters: parameters,

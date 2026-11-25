@@ -1,5 +1,6 @@
-//! The two latches — low battery and charging, the node's only derived state beyond the latest
-//! sample of each input — and the `state` rollup that reads them.
+//! The two battery latches — low battery and charging — and the `state` rollup that reads them
+//! together with the state machine's facts (`lifecycle.rs`: confirmed position, running task,
+//! latched failure).
 //!
 //! Pure: no ROS types, no clock, no logging. The caller decides what to say about the
 //! [`LatchChange`] it gets back.
@@ -202,29 +203,76 @@ impl ChargingLatch {
 /// the message's constants so the precedence can be tested without ROS; `state.rs` maps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
+    Error,
     Uninitialized,
+    Running,
     Charging,
     Warning,
     Idle,
 }
 
+/// Everything the rollup reads, named: five bools in a row at a call site are five chances to
+/// pass them in the wrong order, and every wrong order type-checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rollup {
+    /// A failure is latched (`Lifecycle::fault`).
+    pub error: bool,
+    /// An operator has confirmed the position AND there is a pose to report. See
+    /// [`Rollup::initialized`].
+    pub initialized: bool,
+    /// A task is running (`Lifecycle::task`).
+    pub running: bool,
+    /// The [`ChargingLatch`]: engaged by the charger delivering more than the robot draws, held
+    /// through the taper of a filling pack.
+    pub charging: bool,
+    /// The [`LowBatteryLatch`].
+    pub low_battery: bool,
+}
+
+impl Rollup {
+    /// The one definition of "initialized", shared by the rollup and by `begin_task`'s gate so
+    /// that the published state and the answer a task gets cannot disagree.
+    ///
+    /// `confirmed` is the operator's confirmation of the localizer's current estimate.
+    /// `pose_available` is the old meaning of UNINITIALIZED, kept as a second condition: with no
+    /// `map -> base_link` the pose in the message is a zero placeholder, and a state that claimed
+    /// otherwise would be lying about the very field beside it. In practice it cannot hold a
+    /// confirmed robot back — a converged guess needs the odometry the transform comes with —
+    /// which is why it can be a condition here without being a reason given to the operator.
+    pub fn initialized(confirmed: bool, pose_available: bool) -> bool {
+        confirmed && pose_available
+    }
+}
+
 /// Most-severe-first.
 ///
-/// `Uninitialized` outranks everything: "we do not know where the robot is" is the more
-/// fundamental fact, and hiding it would leave the zeroed pose in the same message reading as one.
+/// `Error` outranks everything (2026-11): it is the one state that stops EVERY task and that
+/// only a person can end, so nothing may sit in front of it — an operator who sees
+/// UNINITIALIZED confirms the position and still has a robot that refuses every task.
+///
+/// `Uninitialized` outranks the rest: "nobody has confirmed where the robot is" is the more
+/// fundamental fact, and above `Running` on purpose. A consumer can then read "neither `Error`
+/// nor `Uninitialized`" as "the position is confirmed" without a field for it. The price is that
+/// a posture task run on an unconfirmed robot reads `Uninitialized` while it runs; `state_message`
+/// and the console's own job bar say that it does.
+///
+/// `Running` outranks the battery states: what the robot is doing matters more to someone
+/// deciding whether to send it a task than how full it is, and the battery percentage is in the
+/// message either way.
 ///
 /// `Charging` outranks `Warning` (2026-11-18): a low pack on its charger is the problem being
 /// solved, not one to raise. The low-battery latch keeps running underneath, so a robot taken
 /// off the charger still low reads `Warning` again on the next tick.
-///
-/// `charging` is the [`ChargingLatch`]: engaged by the charger delivering more than the robot
-/// draws, held through the taper of a filling pack.
-pub fn derive_status(localization_valid: bool, charging: bool, low_battery: bool) -> Status {
-    if !localization_valid {
+pub fn derive_status(facts: Rollup) -> Status {
+    if facts.error {
+        Status::Error
+    } else if !facts.initialized {
         Status::Uninitialized
-    } else if charging {
+    } else if facts.running {
+        Status::Running
+    } else if facts.charging {
         Status::Charging
-    } else if low_battery {
+    } else if facts.low_battery {
         Status::Warning
     } else {
         Status::Idle
@@ -266,23 +314,94 @@ mod tests {
         assert!(!latch.is_engaged());
     }
 
+    /// A confirmed robot at rest on a healthy pack; each test changes what it is about.
+    const AT_REST: Rollup = Rollup {
+        error: false,
+        initialized: true,
+        running: false,
+        charging: false,
+        low_battery: false,
+    };
+
     #[test]
-    fn an_unlocalized_robot_is_uninitialized_whatever_its_battery() {
-        assert_eq!(derive_status(false, true, true), Status::Uninitialized);
-        assert_eq!(derive_status(false, true, false), Status::Uninitialized);
-        assert_eq!(derive_status(false, false, true), Status::Uninitialized);
+    fn a_latched_error_outranks_everything() {
+        for initialized in [false, true] {
+            for running in [false, true] {
+                let facts = Rollup {
+                    error: true,
+                    initialized,
+                    running,
+                    charging: true,
+                    low_battery: true,
+                };
+                assert_eq!(derive_status(facts), Status::Error);
+            }
+        }
+    }
+
+    #[test]
+    fn an_unconfirmed_robot_is_uninitialized_whatever_else_is_true() {
+        for running in [false, true] {
+            for charging in [false, true] {
+                for low_battery in [false, true] {
+                    let facts = Rollup {
+                        initialized: false,
+                        running,
+                        charging,
+                        low_battery,
+                        ..AT_REST
+                    };
+                    assert_eq!(derive_status(facts), Status::Uninitialized);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_running_task_outranks_the_battery() {
+        let facts = Rollup {
+            running: true,
+            charging: true,
+            low_battery: true,
+            ..AT_REST
+        };
+        assert_eq!(derive_status(facts), Status::Running);
     }
 
     #[test]
     fn charging_outranks_a_low_battery() {
-        assert_eq!(derive_status(true, true, true), Status::Charging);
-        assert_eq!(derive_status(true, true, false), Status::Charging);
+        let charging = Rollup {
+            charging: true,
+            ..AT_REST
+        };
+        assert_eq!(derive_status(charging), Status::Charging);
+        assert_eq!(
+            derive_status(Rollup {
+                low_battery: true,
+                ..charging
+            }),
+            Status::Charging
+        );
     }
 
     #[test]
     fn a_low_battery_off_the_charger_warns() {
-        assert_eq!(derive_status(true, false, true), Status::Warning);
-        assert_eq!(derive_status(true, false, false), Status::Idle);
+        assert_eq!(
+            derive_status(Rollup {
+                low_battery: true,
+                ..AT_REST
+            }),
+            Status::Warning
+        );
+        assert_eq!(derive_status(AT_REST), Status::Idle);
+    }
+
+    #[test]
+    fn initialized_needs_both_the_confirmation_and_a_pose() {
+        assert!(Rollup::initialized(true, true));
+        assert!(!Rollup::initialized(true, false));
+        assert!(!Rollup::initialized(false, true));
+        assert!(!Rollup::initialized(false, false));
     }
 
     #[test]

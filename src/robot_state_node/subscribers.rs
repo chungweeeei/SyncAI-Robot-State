@@ -1,4 +1,4 @@
-//! The eight subscriptions, all on the node's single worker.
+//! The nine subscriptions, all on the node's single worker.
 //!
 //! Topic names are relative so they inherit the `<robot_id>` namespace — except `/tf` and
 //! `/tf_static`, which are absolute because TF is global in ROS 2. That is why the launch file
@@ -13,10 +13,11 @@ use rclrs::*;
 use ros_env::nav_msgs::msg::Odometry;
 use ros_env::sensor_msgs::msg::BatteryState;
 use ros_env::std_msgs::msg::{Bool, Int32MultiArray};
-use ros_env::syncai_common::msg::{MotorStates, WifiStatus};
+use ros_env::syncai_common::msg::{LocalizationStatus, MotorStates, WifiStatus};
 use ros_env::tf2_msgs::msg::TFMessage;
 
 use super::health::ChargeReading;
+use super::lifecycle::Localization;
 use super::state::RobotStateData;
 use super::tf::{Quaternion, Transform};
 use super::wifi::WifiInfo;
@@ -34,6 +35,7 @@ pub struct Subscriptions {
     _motor_states: WorkerSubscription<MotorStates, RobotStateData>,
     _mode: WorkerSubscription<Int32MultiArray, RobotStateData>,
     _safety_locked: WorkerSubscription<Bool, RobotStateData>,
+    _localization_status: WorkerSubscription<LocalizationStatus, RobotStateData>,
     _tf: WorkerSubscription<TFMessage, RobotStateData>,
     _tf_static: WorkerSubscription<TFMessage, RobotStateData>,
 }
@@ -130,6 +132,35 @@ impl Subscriptions {
                 "safety_locked".keep_last(1).reliable().transient_local(),
                 |data: &mut RobotStateData, msg: Bool| {
                     data.accept_safety_locked(msg.data);
+                },
+            )?,
+
+            // From syncai_localizer (bare robot_id namespace, like its services): the facts the
+            // state machine reads — which map, has the last guess converged, and the epoch that
+            // names the estimate an operator's confirmation was given for.
+            //
+            // Latched for the reason safety_locked is: it is published on a change only, and this
+            // node may well start after the last one (the localizer's boot guess converges within
+            // seconds; this pane comes up later). Without the replay the robot would look
+            // unconverged, and unconfirmable, until the next guess.
+            //
+            // Same price as safety_locked, too: this reader REQUIRES a transient-local writer, so
+            // relaxing the localizer's publisher to VOLATILE stops the match silently and the
+            // position can never be confirmed. Change the two together.
+            //
+            // The mapping session runs no localizer, so nothing arrives there and the robot stays
+            // UNINITIALIZED for the whole run — which is right: there is no map to be placed on.
+            _localization_status: worker.create_subscription(
+                "localization_status"
+                    .keep_last(1)
+                    .reliable()
+                    .transient_local(),
+                |data: &mut RobotStateData, msg: LocalizationStatus| {
+                    data.accept_localization_status(Localization {
+                        map: msg.map,
+                        converged: msg.converged,
+                        epoch: msg.pose_epoch,
+                    });
                 },
             )?,
 
